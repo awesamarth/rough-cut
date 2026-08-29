@@ -62,6 +62,10 @@ export function useEditor(projectId: string) {
     });
   }, [load, projectId]);
 
+  const previewClip = useCallback((clipId: string, patch: Partial<ProjectState["clips"][number]>) => {
+    setState((current) => current ? { ...current, clips: current.clips.map((clip) => clip.id === clipId ? { ...clip, ...patch } : clip) } : current);
+  }, []);
+
   const dispatch = useCallback((input: CommandInput) => {
     const current = stateRef.current;
     if (!current) throw new Error("Project is not ready");
@@ -127,7 +131,7 @@ export function useEditor(projectId: string) {
 
   return {
     project, state, stateRef, transcript, transcriptRef, error, setError, saving,
-    initialize, dispatch, undo, redo, saveTranscript, reload: load,
+    initialize, dispatch, previewClip, undo, redo, saveTranscript, reload: load,
     canUndo: past.current.length > 0, canRedo: future.current.length > 0,
   };
 }

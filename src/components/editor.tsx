@@ -23,7 +23,7 @@ function downloadText(name: string, text: string, type = "text/plain") {
 
 export function Editor({ projectId }: { projectId: string }) {
   const editor = useEditor(projectId);
-  const { project, state, transcript, dispatch, initialize, undo, redo, saveTranscript, saving, error, setError } = editor;
+  const { project, state, transcript, dispatch, previewClip, initialize, undo, redo, saveTranscript, saving, error, setError } = editor;
   const videoRef = useRef<HTMLVideoElement>(null);
   const nextVideoRef = useRef<HTMLVideoElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
@@ -243,7 +243,7 @@ export function Editor({ projectId }: { projectId: string }) {
 
         <aside className="inspector">
           <div className="panel-heading"><span>Inspector</span>{selectedClip && <code>{formatTime(clipDuration(selectedClip))}</code>}</div>
-          {state && selectedClip ? <ClipInspector state={state} clip={selectedClip} dispatch={dispatch} setError={setError} /> : <p className="empty-copy">Select a clip to adjust it.</p>}
+          {state && selectedClip ? <ClipInspector state={state} clip={selectedClip} dispatch={dispatch} previewClip={previewClip} setError={setError} /> : <p className="empty-copy">Select a clip to adjust it.</p>}
         </aside>
       </section>
 
@@ -280,13 +280,14 @@ export function Editor({ projectId }: { projectId: string }) {
   );
 }
 
-function RangeControl({ label, value, min, max, step, suffix = "", onCommit }: { label: string; value: number; min: number; max: number; step: number; suffix?: string; onCommit(value: number): void }) {
+function RangeControl({ label, value, min, max, step, suffix = "", onPreview, onCommit }: { label: string; value: number; min: number; max: number; step: number; suffix?: string; onPreview?(value: number): void; onCommit(value: number): void }) {
   const [draft, setDraft] = useState(value);
   useEffect(() => setDraft(value), [value]);
-  return <label className="range-control"><span>{label}<output>{draft}{suffix}</output></span><input type="range" min={min} max={max} step={step} value={draft} onChange={(event) => setDraft(Number(event.target.value))} onPointerUp={() => onCommit(draft)} onKeyUp={() => onCommit(draft)} /></label>;
+  return <label className="range-control"><span>{label}<output>{draft}{suffix}</output></span><input type="range" min={min} max={max} step={step} value={draft} onChange={(event) => { const next = Number(event.target.value); setDraft(next); onPreview?.(next); }} onPointerUp={() => onCommit(draft)} onKeyUp={() => onCommit(draft)} /></label>;
 }
 
-function ClipInspector({ state, clip, dispatch, setError }: { state: ProjectState; clip: Clip; dispatch(command: CommandInput): ProjectState; setError(message: string): void }) {
+function ClipInspector({ state, clip, dispatch, previewClip, setError }: { state: ProjectState; clip: Clip; dispatch(command: CommandInput): ProjectState; previewClip(clipId: string, patch: Partial<Clip>): void; setError(message: string): void }) {
+  const preview = (patch: Partial<Clip>) => previewClip(clip.id, patch);
   const adjust = (patch: Partial<Clip>) => { try { dispatch({ type: "adjust_clip", actor: "human", clipId: clip.id, patch }); } catch (cause) { setError((cause as Error).message); } };
   const next = state.clips[state.clips.findIndex((item) => item.id === clip.id) + 1];
   return <div className="inspector-form">
@@ -295,22 +296,22 @@ function ClipInspector({ state, clip, dispatch, setError }: { state: ProjectStat
       <label>Out<input key={`${clip.id}-out-${clip.sourceOutMs}`} type="number" defaultValue={Math.round(clip.sourceOutMs)} onBlur={(event) => { const value = Number(event.target.value); if (value > clip.sourceInMs && value !== clip.sourceOutMs) dispatch({ type: "trim_clip", actor: "human", clipId: clip.id, sourceInMs: clip.sourceInMs, sourceOutMs: value }); }} /></label>
     </div>
     <h3>Color</h3>
-    <RangeControl label="Brightness" value={clip.brightness} min={-1} max={1} step={0.05} onCommit={(brightness) => adjust({ brightness })} />
-    <RangeControl label="Contrast" value={clip.contrast} min={0} max={2} step={0.05} onCommit={(contrast) => adjust({ contrast })} />
-    <RangeControl label="Saturation" value={clip.saturation} min={0} max={3} step={0.05} onCommit={(saturation) => adjust({ saturation })} />
-    <RangeControl label="Hue" value={clip.hue} min={-180} max={180} step={1} suffix="°" onCommit={(hue) => adjust({ hue })} />
+    <RangeControl label="Brightness" value={clip.brightness} min={-1} max={1} step={0.05} onPreview={(brightness) => preview({ brightness })} onCommit={(brightness) => adjust({ brightness })} />
+    <RangeControl label="Contrast" value={clip.contrast} min={0} max={2} step={0.05} onPreview={(contrast) => preview({ contrast })} onCommit={(contrast) => adjust({ contrast })} />
+    <RangeControl label="Saturation" value={clip.saturation} min={0} max={3} step={0.05} onPreview={(saturation) => preview({ saturation })} onCommit={(saturation) => adjust({ saturation })} />
+    <RangeControl label="Hue" value={clip.hue} min={-180} max={180} step={1} suffix="°" onPreview={(hue) => preview({ hue })} onCommit={(hue) => adjust({ hue })} />
     <h3>Playback</h3>
-    <RangeControl label="Volume" value={clip.volume} min={0} max={2} step={0.05} onCommit={(volume) => adjust({ volume })} />
-    <RangeControl label="Speed" value={clip.speed} min={0.5} max={2} step={0.05} suffix="×" onCommit={(speed) => adjust({ speed })} />
+    <RangeControl label="Volume" value={clip.volume} min={0} max={2} step={0.05} onPreview={(volume) => preview({ volume })} onCommit={(volume) => adjust({ volume })} />
+    <RangeControl label="Speed" value={clip.speed} min={0.5} max={2} step={0.05} suffix="×" onPreview={(speed) => preview({ speed })} onCommit={(speed) => adjust({ speed })} />
     <label className="check-row"><input type="checkbox" checked={clip.muted} onChange={(event) => adjust({ muted: event.target.checked })} /> Mute clip</label>
     <h3>Fades</h3>
-    <RangeControl label="Fade in" value={clip.fadeInMs} min={0} max={Math.min(3000, clipDuration(clip) / 2)} step={50} suffix="ms" onCommit={(fadeInMs) => adjust({ fadeInMs })} />
-    <RangeControl label="Fade out" value={clip.fadeOutMs} min={0} max={Math.min(3000, clipDuration(clip) / 2)} step={50} suffix="ms" onCommit={(fadeOutMs) => adjust({ fadeOutMs })} />
+    <RangeControl label="Fade in" value={clip.fadeInMs} min={0} max={Math.min(3000, clipDuration(clip) / 2)} step={50} suffix="ms" onPreview={(fadeInMs) => preview({ fadeInMs })} onCommit={(fadeInMs) => adjust({ fadeInMs })} />
+    <RangeControl label="Fade out" value={clip.fadeOutMs} min={0} max={Math.min(3000, clipDuration(clip) / 2)} step={50} suffix="ms" onPreview={(fadeOutMs) => preview({ fadeOutMs })} onCommit={(fadeOutMs) => adjust({ fadeOutMs })} />
     <h3>Transition</h3>
     <select disabled={!next} value={clip.transition.type} onChange={(event) => dispatch({ type: "set_transition", actor: "human", clipId: clip.id, transition: { type: event.target.value as Clip["transition"]["type"], durationMs: event.target.value === "cut" ? 0 : Math.max(300, clip.transition.durationMs) } })}>
       <option value="cut">Hard cut</option><option value="crossfade">Crossfade</option><option value="fade-black">Fade through black</option>
     </select>
-    {clip.transition.type !== "cut" && next && <RangeControl label="Duration" value={clip.transition.durationMs} min={100} max={Math.min(3000, clipDuration(clip) / 2, clipDuration(next) / 2)} step={50} suffix="ms" onCommit={(durationMs) => dispatch({ type: "set_transition", actor: "human", clipId: clip.id, transition: { ...clip.transition, durationMs } })} />}
+    {clip.transition.type !== "cut" && next && <RangeControl label="Duration" value={clip.transition.durationMs} min={100} max={Math.min(3000, clipDuration(clip) / 2, clipDuration(next) / 2)} step={50} suffix="ms" onPreview={(durationMs) => preview({ transition: { ...clip.transition, durationMs } })} onCommit={(durationMs) => dispatch({ type: "set_transition", actor: "human", clipId: clip.id, transition: { ...clip.transition, durationMs } })} />}
   </div>;
 }
 
