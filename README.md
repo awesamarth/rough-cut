@@ -1,0 +1,88 @@
+# ROUGH//CUT
+
+A human-first, WebMCP-native video editor. Humans edit through the timeline and transcript; compatible browser agents call the same versioned editing commands through `document.modelContext.registerTool`.
+
+**Live app:** https://rough-cut.samarthsaxena1672003.workers.dev
+
+## What works
+
+- Chunked video uploads to R2 and durable project revisions in D1
+- Non-destructive split, trim, delete, reorder, protected ranges, undo and redo
+- Brightness, contrast, saturation, hue, volume, mute and speed controls
+- Crossfades, fade-through-black, edge fades, captions and text overlays
+- B-roll markers and exact-frame inspection
+- FFmpeg silence detection with configurable speech padding
+- Cloudflare Whisper Large v3 Turbo transcription with word timestamps
+- Optional session-only OpenAI `whisper-1` key
+- Real FFmpeg MP4 rendering and CMX3600-style EDL export
+- Direct WebMCP tools with optimistic version checks
+
+No built-in chat or agent is included. Open the app inside a WebMCP-compatible agent browser.
+
+## Local development
+
+Requirements: Bun, Docker Desktop, Wrangler authentication, and a browser-playable source video (H.264/AAC MP4 works best).
+
+```bash
+bun install
+cp .env.example .dev.vars
+bun run db:migrate:local
+docker compose up --build -d
+bun run dev
+```
+
+Open http://localhost:3000. The local media service runs at http://localhost:8788.
+
+Useful checks:
+
+```bash
+bun run typecheck
+bun test
+curl http://localhost:8788/health
+docker compose logs -f media
+```
+
+## Cloudflare
+
+The app uses:
+
+- Worker: `rough-cut`
+- D1: `rough-cut-db`
+- R2 media: `rough-cut-media`
+- R2 Next cache: `rough-cut-next-opennext-cache`
+- Workers AI: `@cf/openai/whisper-large-v3-turbo`
+
+For a new Cloudflare account, create those resources, replace the D1 ID and worker URLs in the Wrangler configs, then run:
+
+```bash
+bunx wrangler login
+bun run db:migrate:remote
+
+TOKEN=$(openssl rand -hex 32)
+printf '%s' "$TOKEN" | bunx wrangler secret put MEDIA_WORKER_TOKEN --config media-worker/wrangler.jsonc
+printf '%s' "$TOKEN" | bunx wrangler secret put MEDIA_WORKER_TOKEN --config wrangler.jsonc
+
+bun run media:deploy
+bun run deploy
+```
+
+Cloudflare Containers require the Workers Paid plan. The browser talks only to the Next.js `/api/media/*` proxy; the separate media Worker rejects requests without the shared secret.
+
+## Media architecture
+
+Uploaded originals remain immutable. Every edit is stored as source timestamps and parameters. Browser preview uses the source/proxy timeline; FFmpeg applies the same instructions to the original during export.
+
+```text
+Browser UI ─┐
+WebMCP tools ├─ editing commands → D1 revisions
+             └─ authenticated API proxy → FFmpeg Container → MP4
+                                          └→ audio chunks → Workers AI transcript
+```
+
+## WebMCP testing
+
+Use ChatGPT's in-app browser or enable `chrome://flags/#enable-webmcp-testing`. Open an editor project; tools register only on that page. The activity panel makes human and agent changes visible.
+
+## License
+
+MIT

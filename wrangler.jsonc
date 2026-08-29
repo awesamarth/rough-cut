@@ -1,0 +1,50 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "main": ".open-next/worker.js",
+  "name": "rough-cut",
+  "compatibility_date": "2026-08-28",
+  "compatibility_flags": [
+    "global_fetch_strictly_public"
+  ],
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS"
+  },
+  "services": [
+    {
+      "binding": "WORKER_SELF_REFERENCE",
+      "service": "rough-cut"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "NEXT_INC_CACHE_R2_BUCKET",
+      "bucket_name": "rough-cut-next-opennext-cache"
+    },
+    {
+      "binding": "MEDIA",
+      "bucket_name": "rough-cut-media"
+    }
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "rough-cut-db",
+      "database_id": "60e909d4-5c87-4f50-8637-17a3670f632b",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "ai": {
+    "binding": "AI",
+    "remote": true
+  },
+  "vars": {
+    "MEDIA_WORKER_URL": "https://rough-cut-media.samarthsaxena1672003.workers.dev"
+  },
+  "images": {
+    "binding": "IMAGES"
+  },
+  "observability": {
+    "enabled": true
+  }
+}

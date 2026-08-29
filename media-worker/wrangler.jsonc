@@ -1,0 +1,32 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "rough-cut-media",
+  "main": "cloudflare.ts",
+  "compatibility_date": "2026-08-28",
+  "containers": [
+    {
+      "class_name": "MediaContainer",
+      "image": "./Dockerfile",
+      "image_build_context": "..",
+      "max_instances": 1,
+      "instance_type": "standard-1"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "MEDIA_CONTAINER",
+        "class_name": "MediaContainer"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["MediaContainer"]
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}
