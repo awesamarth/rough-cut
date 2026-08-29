@@ -88,7 +88,11 @@ button:disabled { cursor: not-allowed; opacity: .42; }
 .inspector-form h3 { margin: 18px -14px 10px; padding: 0 14px 8px; border-bottom: 1px solid #242830; color: #7f8590; text-transform: uppercase; letter-spacing: .12em; font-size: 9px; }
 .inspector-form select, .panel-actions select, .text-form select { width: 100%; border: 1px solid var(--line); background: #0e1014; border-radius: 5px; padding: 7px; font-size: 11px; }
 .range-control { display: block; margin: 10px 0; }
-.range-control span { display: flex; justify-content: space-between; color: #a6abb4; font-size: 10px; }.range-control output { color: #f3f3f4; font-family: monospace; }
+.range-label { display: flex; justify-content: space-between; align-items: center; color: #a6abb4; font-size: 10px; }
+.range-value { display: flex; align-items: center; gap: 5px; }
+.range-control output { color: #f3f3f4; font-family: monospace; }
+.range-reset { border: 0; padding: 0; width: 16px; height: 16px; color: #858b96; background: transparent; font-size: 13px; line-height: 16px; }
+.range-reset:hover, .range-reset:focus-visible { color: var(--lime); }
 .range-control input { width: 100%; height: 3px; accent-color: var(--lime); }
 .trim-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
 .trim-fields label { color: var(--muted); font-size: 9px; text-transform: uppercase; }

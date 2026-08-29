@@ -280,10 +280,11 @@ export function Editor({ projectId }: { projectId: string }) {
   );
 }
 
-function RangeControl({ label, value, min, max, step, suffix = "", onPreview, onCommit }: { label: string; value: number; min: number; max: number; step: number; suffix?: string; onPreview?(value: number): void; onCommit(value: number): void }) {
+function RangeControl({ label, value, resetValue, min, max, step, suffix = "", onPreview, onCommit }: { label: string; value: number; resetValue: number; min: number; max: number; step: number; suffix?: string; onPreview?(value: number): void; onCommit(value: number): void }) {
   const [draft, setDraft] = useState(value);
   useEffect(() => setDraft(value), [value]);
-  return <label className="range-control"><span>{label}<output>{draft}{suffix}</output></span><input type="range" min={min} max={max} step={step} value={draft} onChange={(event) => { const next = Number(event.target.value); setDraft(next); onPreview?.(next); }} onPointerUp={() => onCommit(draft)} onKeyUp={() => onCommit(draft)} /></label>;
+  const reset = () => { const next = Math.max(min, Math.min(max, resetValue)); setDraft(next); onPreview?.(next); onCommit(next); };
+  return <label className="range-control"><span className="range-label">{label}<span className="range-value"><output>{draft}{suffix}</output><button type="button" className="range-reset" title={`Reset ${label}`} aria-label={`Reset ${label}`} onClick={(event) => { event.preventDefault(); reset(); }}>↻</button></span></span><input type="range" min={min} max={max} step={step} value={draft} onChange={(event) => { const next = Number(event.target.value); setDraft(next); onPreview?.(next); }} onPointerUp={() => onCommit(draft)} onKeyUp={() => onCommit(draft)} /></label>;
 }
 
 function ClipInspector({ state, clip, dispatch, previewClip, setError }: { state: ProjectState; clip: Clip; dispatch(command: CommandInput): ProjectState; previewClip(clipId: string, patch: Partial<Clip>): void; setError(message: string): void }) {
@@ -296,22 +297,22 @@ function ClipInspector({ state, clip, dispatch, previewClip, setError }: { state
       <label>Out<input key={`${clip.id}-out-${clip.sourceOutMs}`} type="number" defaultValue={Math.round(clip.sourceOutMs)} onBlur={(event) => { const value = Number(event.target.value); if (value > clip.sourceInMs && value !== clip.sourceOutMs) dispatch({ type: "trim_clip", actor: "human", clipId: clip.id, sourceInMs: clip.sourceInMs, sourceOutMs: value }); }} /></label>
     </div>
     <h3>Color</h3>
-    <RangeControl label="Brightness" value={clip.brightness} min={-1} max={1} step={0.05} onPreview={(brightness) => preview({ brightness })} onCommit={(brightness) => adjust({ brightness })} />
-    <RangeControl label="Contrast" value={clip.contrast} min={0} max={2} step={0.05} onPreview={(contrast) => preview({ contrast })} onCommit={(contrast) => adjust({ contrast })} />
-    <RangeControl label="Saturation" value={clip.saturation} min={0} max={3} step={0.05} onPreview={(saturation) => preview({ saturation })} onCommit={(saturation) => adjust({ saturation })} />
-    <RangeControl label="Hue" value={clip.hue} min={-180} max={180} step={1} suffix="°" onPreview={(hue) => preview({ hue })} onCommit={(hue) => adjust({ hue })} />
+    <RangeControl label="Brightness" value={clip.brightness} resetValue={0} min={-1} max={1} step={0.05} onPreview={(brightness) => preview({ brightness })} onCommit={(brightness) => adjust({ brightness })} />
+    <RangeControl label="Contrast" value={clip.contrast} resetValue={1} min={0} max={2} step={0.05} onPreview={(contrast) => preview({ contrast })} onCommit={(contrast) => adjust({ contrast })} />
+    <RangeControl label="Saturation" value={clip.saturation} resetValue={1} min={0} max={3} step={0.05} onPreview={(saturation) => preview({ saturation })} onCommit={(saturation) => adjust({ saturation })} />
+    <RangeControl label="Hue" value={clip.hue} resetValue={0} min={-180} max={180} step={1} suffix="°" onPreview={(hue) => preview({ hue })} onCommit={(hue) => adjust({ hue })} />
     <h3>Playback</h3>
-    <RangeControl label="Volume" value={clip.volume} min={0} max={2} step={0.05} onPreview={(volume) => preview({ volume })} onCommit={(volume) => adjust({ volume })} />
-    <RangeControl label="Speed" value={clip.speed} min={0.5} max={2} step={0.05} suffix="×" onPreview={(speed) => preview({ speed })} onCommit={(speed) => adjust({ speed })} />
+    <RangeControl label="Volume" value={clip.volume} resetValue={1} min={0} max={2} step={0.05} onPreview={(volume) => preview({ volume })} onCommit={(volume) => adjust({ volume })} />
+    <RangeControl label="Speed" value={clip.speed} resetValue={1} min={0.5} max={2} step={0.05} suffix="×" onPreview={(speed) => preview({ speed })} onCommit={(speed) => adjust({ speed })} />
     <label className="check-row"><input type="checkbox" checked={clip.muted} onChange={(event) => adjust({ muted: event.target.checked })} /> Mute clip</label>
     <h3>Fades</h3>
-    <RangeControl label="Fade in" value={clip.fadeInMs} min={0} max={Math.min(3000, clipDuration(clip) / 2)} step={50} suffix="ms" onPreview={(fadeInMs) => preview({ fadeInMs })} onCommit={(fadeInMs) => adjust({ fadeInMs })} />
-    <RangeControl label="Fade out" value={clip.fadeOutMs} min={0} max={Math.min(3000, clipDuration(clip) / 2)} step={50} suffix="ms" onPreview={(fadeOutMs) => preview({ fadeOutMs })} onCommit={(fadeOutMs) => adjust({ fadeOutMs })} />
+    <RangeControl label="Fade in" value={clip.fadeInMs} resetValue={0} min={0} max={Math.min(3000, clipDuration(clip) / 2)} step={50} suffix="ms" onPreview={(fadeInMs) => preview({ fadeInMs })} onCommit={(fadeInMs) => adjust({ fadeInMs })} />
+    <RangeControl label="Fade out" value={clip.fadeOutMs} resetValue={0} min={0} max={Math.min(3000, clipDuration(clip) / 2)} step={50} suffix="ms" onPreview={(fadeOutMs) => preview({ fadeOutMs })} onCommit={(fadeOutMs) => adjust({ fadeOutMs })} />
     <h3>Transition</h3>
     <select disabled={!next} value={clip.transition.type} onChange={(event) => dispatch({ type: "set_transition", actor: "human", clipId: clip.id, transition: { type: event.target.value as Clip["transition"]["type"], durationMs: event.target.value === "cut" ? 0 : Math.max(300, clip.transition.durationMs) } })}>
       <option value="cut">Hard cut</option><option value="crossfade">Crossfade</option><option value="fade-black">Fade through black</option>
     </select>
-    {clip.transition.type !== "cut" && next && <RangeControl label="Duration" value={clip.transition.durationMs} min={100} max={Math.min(3000, clipDuration(clip) / 2, clipDuration(next) / 2)} step={50} suffix="ms" onPreview={(durationMs) => preview({ transition: { ...clip.transition, durationMs } })} onCommit={(durationMs) => dispatch({ type: "set_transition", actor: "human", clipId: clip.id, transition: { ...clip.transition, durationMs } })} />}
+    {clip.transition.type !== "cut" && next && <RangeControl label="Duration" value={clip.transition.durationMs} resetValue={500} min={100} max={Math.min(3000, clipDuration(clip) / 2, clipDuration(next) / 2)} step={50} suffix="ms" onPreview={(durationMs) => preview({ transition: { ...clip.transition, durationMs } })} onCommit={(durationMs) => dispatch({ type: "set_transition", actor: "human", clipId: clip.id, transition: { ...clip.transition, durationMs } })} />}
   </div>;
 }
 
@@ -454,7 +455,7 @@ function SilencePanel({ transcript, detect, dispatch, setError }: { transcript: 
     const removals = ranges.filter((_, index) => selected.has(index)).map((range) => ({ startMs: range.startMs + padding, endMs: range.endMs - padding })).filter((range) => range.endMs - range.startMs >= 50);
     try { dispatch({ type: "remove_segments", actor: "human", ranges: removals }); setRanges([]); } catch (cause) { setError((cause as Error).message); }
   };
-  return <div className="silence-panel"><div className="silence-controls"><RangeControl label="Threshold" value={threshold} min={-60} max={-10} step={1} suffix="dB" onCommit={setThreshold} /><RangeControl label="Minimum" value={minimum} min={100} max={3000} step={100} suffix="ms" onCommit={setMinimum} /><RangeControl label="Speech padding" value={padding} min={0} max={500} step={25} suffix="ms" onCommit={setPadding} /><button className="primary-button compact" disabled={working} onClick={() => void scan()}>{working ? "Scanning audio…" : "Find silences"}</button></div>{ranges.length > 0 && <><div className="silence-ranges">{ranges.map((range, index) => <label key={`${range.startMs}-${range.endMs}`}><input type="checkbox" checked={selected.has(index)} onChange={() => setSelected((current) => { const next = new Set(current); if (next.has(index)) next.delete(index); else next.add(index); return next; })} /><span>{formatTime(range.startMs)} → {formatTime(range.endMs)}</span><b>{((range.endMs - range.startMs) / 1000).toFixed(1)}s</b></label>)}</div><button onClick={apply}>Remove {selected.size} selected silences</button></>}</div>;
+  return <div className="silence-panel"><div className="silence-controls"><RangeControl label="Threshold" value={threshold} resetValue={-35} min={-60} max={-10} step={1} suffix="dB" onCommit={setThreshold} /><RangeControl label="Minimum" value={minimum} resetValue={500} min={100} max={3000} step={100} suffix="ms" onCommit={setMinimum} /><RangeControl label="Speech padding" value={padding} resetValue={200} min={0} max={500} step={25} suffix="ms" onCommit={setPadding} /><button className="primary-button compact" disabled={working} onClick={() => void scan()}>{working ? "Scanning audio…" : "Find silences"}</button></div>{ranges.length > 0 && <><div className="silence-ranges">{ranges.map((range, index) => <label key={`${range.startMs}-${range.endMs}`}><input type="checkbox" checked={selected.has(index)} onChange={() => setSelected((current) => { const next = new Set(current); if (next.has(index)) next.delete(index); else next.add(index); return next; })} /><span>{formatTime(range.startMs)} → {formatTime(range.endMs)}</span><b>{((range.endMs - range.startMs) / 1000).toFixed(1)}s</b></label>)}</div><button onClick={apply}>Remove {selected.size} selected silences</button></>}</div>;
 }
 
 function ActivityPanel({ state }: { state: ProjectState }) { return <div className="activity-list">{state.activity.length ? state.activity.map((item) => <div key={item.id}><span className={item.actor}>{item.actor.slice(0, 1)}</span><p><b>{item.summary}</b><small>{new Date(item.at).toLocaleTimeString()}</small></p></div>) : <p className="empty-copy">Edits from you and your agent will appear here.</p>}</div>; }
