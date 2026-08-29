@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { RotateCcw } from "lucide-react";
 import { forwardRef, useCallback, useEffect, useRef, useState } from "react";
 import { clipDuration, timelineClips, timelineDuration, timelineToSource, type Clip, type ProjectState, type SourceRange, type TimedText, type TranscriptWord } from "@/lib/editor";
 import { exportEdl } from "@/lib/edl";
@@ -284,7 +285,7 @@ function RangeControl({ label, value, resetValue, min, max, step, suffix = "", o
   const [draft, setDraft] = useState(value);
   useEffect(() => setDraft(value), [value]);
   const reset = () => { const next = Math.max(min, Math.min(max, resetValue)); setDraft(next); onPreview?.(next); onCommit(next); };
-  return <label className="range-control"><span className="range-label">{label}<span className="range-value"><output>{draft}{suffix}</output><button type="button" className="range-reset" title={`Reset ${label}`} aria-label={`Reset ${label}`} onClick={(event) => { event.preventDefault(); reset(); }}>↻</button></span></span><input type="range" min={min} max={max} step={step} value={draft} onChange={(event) => { const next = Number(event.target.value); setDraft(next); onPreview?.(next); }} onPointerUp={() => onCommit(draft)} onKeyUp={() => onCommit(draft)} /></label>;
+  return <label className="range-control"><span className="range-label">{label}<span className="range-value"><output>{draft}{suffix}</output><button type="button" className="range-reset" title={`Reset ${label}`} aria-label={`Reset ${label}`} onClick={(event) => { event.preventDefault(); reset(); }}><RotateCcw size={13} strokeWidth={2} aria-hidden="true" /></button></span></span><input type="range" min={min} max={max} step={step} value={draft} onChange={(event) => { const next = Number(event.target.value); setDraft(next); onPreview?.(next); }} onPointerUp={() => onCommit(draft)} onKeyUp={() => onCommit(draft)} /></label>;
 }
 
 function ClipInspector({ state, clip, dispatch, previewClip, setError }: { state: ProjectState; clip: Clip; dispatch(command: CommandInput): ProjectState; previewClip(clipId: string, patch: Partial<Clip>): void; setError(message: string): void }) {
