@@ -2,7 +2,8 @@
 
 A human-first, WebMCP-native video editor. Humans edit through the timeline and transcript; compatible browser agents call the same versioned editing commands through `document.modelContext.registerTool`.
 
-**Live app:** https://rough-cut.samarthsaxena1672003.workers.dev
+**Live app:** https://rough-cut.samarthsaxena1672003.workers.dev  
+**Source:** https://github.com/awesamarth/rough-cut
 
 ## What works
 

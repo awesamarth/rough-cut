@@ -131,4 +131,4 @@ No speaker diarization. “Render” means FFmpeg video generation, not Render.c
 
 ## Current status
 
-The editor, versioned command layer, direct WebMCP tools, D1/R2 persistence, Workers AI transcription, local FFmpeg pipeline, authenticated media proxy, exports, tests, and public Worker are implemented. The Cloudflare Container image is deployment-ready but the account must be upgraded to Workers Paid before Cloudflare will accept it. Submission assets still needed: a public repository, concise write-up, and sub-three-minute YouTube demo.
+The editor, versioned command layer, direct WebMCP tools, D1/R2 persistence, Workers AI transcription, local FFmpeg pipeline, authenticated media proxy, exports, tests, public Worker, and public repository are implemented. The Cloudflare Container image is deployment-ready but the account must be upgraded to Workers Paid before Cloudflare will accept it. Submission assets still needed: a concise write-up and sub-three-minute YouTube demo.
