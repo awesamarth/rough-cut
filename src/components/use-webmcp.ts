@@ -93,9 +93,9 @@ export function useWebMCP(handlers: Handlers) {
         async execute(input) { assertVersion(input); return current.current.dispatch({ type: "trim_clip", actor: "agent", clipId: asString(input.clip_id, "clip_id"), sourceInMs: asNumber(input.source_in_ms, "source_in_ms"), sourceOutMs: asNumber(input.source_out_ms, "source_out_ms") }); },
       },
       {
-        name: "delete_clip", description: "Delete one entire clip. Protected source ranges are rejected.",
-        inputSchema: mutationSchema({ clip_id: string("Clip ID") }, ["clip_id"]), annotations: { destructiveHint: true },
-        async execute(input) { assertVersion(input); return current.current.dispatch({ type: "delete_clip", actor: "agent", clipId: asString(input.clip_id, "clip_id") }); },
+        name: "delete_clip", description: "Delete one entire clip. By default its timeline gap remains; set ripple true to close the removed clip's span. Protected source ranges are rejected.",
+        inputSchema: mutationSchema({ clip_id: string("Clip ID"), ripple: { type: "boolean", description: "Shift later clips left to close the removed span" } }, ["clip_id"]), annotations: { destructiveHint: true },
+        async execute(input) { assertVersion(input); if (input.ripple !== undefined && typeof input.ripple !== "boolean") throw new Error("ripple must be a boolean"); return current.current.dispatch({ type: "delete_clip", actor: "agent", clipId: asString(input.clip_id, "clip_id"), ripple: input.ripple === true }); },
       },
       {
         name: "remove_segments", description: "Remove one or more source-media ranges from every matching clip. Protected ranges are rejected.",

@@ -39,6 +39,7 @@ WebMCP tools ───┘
 - Captions, simple text overlays, and B-roll markers/briefs.
 - Silence suggestions that can be reviewed before removal.
 - Undo/redo, autosave, edit history, and an agent-activity feed.
+- Keyboard editing follows NLE conventions: Backspace lift-deletes and leaves the gap; Delete ripple-deletes and closes the removed span.
 
 ## Editing model
 

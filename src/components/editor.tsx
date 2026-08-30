@@ -241,6 +241,14 @@ export function Editor({ projectId }: { projectId: string }) {
         return;
       }
       if (target?.closest("input, textarea, select, [contenteditable='true']")) return;
+      if ((event.key === "Backspace" || event.key === "Delete") && !event.metaKey && !event.ctrlKey && !event.altKey) {
+        event.preventDefault();
+        if (!event.repeat && selectedClip) {
+          try { dispatch({ type: "delete_clip", actor: "human", clipId: selectedClip.id, ripple: event.key === "Delete" }); }
+          catch (cause) { setError(cause instanceof Error ? cause.message : "Could not delete clip"); }
+        }
+        return;
+      }
       const modifier = event.metaKey || event.ctrlKey;
       if (!modifier) return;
       if (event.key.toLowerCase() === "z") {
@@ -253,7 +261,7 @@ export function Editor({ projectId }: { projectId: string }) {
     };
     window.addEventListener("keydown", shortcuts);
     return () => window.removeEventListener("keydown", shortcuts);
-  }, [redo, togglePlayback, undo]);
+  }, [dispatch, redo, selectedClip, setError, togglePlayback, undo]);
 
   const splitAtPlayhead = () => {
     if (!state) return;
@@ -395,7 +403,7 @@ export function Editor({ projectId }: { projectId: string }) {
           <div className="flex items-center gap-1.5">
             <button aria-label={isPlaying ? "Pause" : "Play"} aria-pressed={isPlaying} title={isPlaying ? "Pause" : "Play"} className="inline-flex w-8 cursor-pointer justify-center rounded-[5px] border border-[var(--line)] bg-[var(--panel-2)] px-2.25 py-1.5 text-[11px]" onClick={togglePlayback}>{isPlaying ? "Ⅱ" : "▶"}</button>
             <button className="cursor-pointer rounded-[5px] border border-[var(--line)] bg-[var(--panel-2)] px-2.25 py-1.5 text-[11px]" onClick={splitAtPlayhead}>⌁ Split</button>
-            <button className="cursor-pointer rounded-[5px] border border-[var(--line)] bg-[var(--panel-2)] px-2.25 py-1.5 text-[11px]" disabled={!selectedClip} onClick={() => selectedClip && dispatch({ type: "delete_clip", actor: "human", clipId: selectedClip.id })}>⌫ Delete</button>
+            <button className="cursor-pointer rounded-[5px] border border-[var(--line)] bg-[var(--panel-2)] px-2.25 py-1.5 text-[11px]" disabled={!selectedClip} title="Delete selected clip and leave its gap (Backspace)" onClick={() => selectedClip && dispatch({ type: "delete_clip", actor: "human", clipId: selectedClip.id })}>⌫ Delete</button>
             <button aria-pressed={effectiveSnapEnabled} title="Toggle timeline snapping (hold Option/Alt to temporarily invert)" className={`inline-flex cursor-pointer items-center gap-1.5 rounded-[5px] border border-[var(--line)] bg-[var(--panel-2)] px-2.25 py-1.5 text-[11px] ${effectiveSnapEnabled ? "!border-[var(--lime)] !text-[var(--lime)]" : ""}`} onClick={() => setSnapEnabled((enabled) => !enabled)}><Magnet className="size-3" aria-hidden="true" /> Snap</button>
           </div>
           <div className="flex items-center gap-1.5">

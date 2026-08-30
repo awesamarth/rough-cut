@@ -68,7 +68,7 @@ export type ProjectState = {
 export type EditorCommand =
   | { type: "split_clip"; expectedVersion: number; actor: Actor; clipId: string; sourceMs: number }
   | { type: "trim_clip"; expectedVersion: number; actor: Actor; clipId: string; sourceInMs: number; sourceOutMs: number }
-  | { type: "delete_clip"; expectedVersion: number; actor: Actor; clipId: string }
+  | { type: "delete_clip"; expectedVersion: number; actor: Actor; clipId: string; ripple?: boolean }
   | { type: "remove_segments"; expectedVersion: number; actor: Actor; ranges: Array<{ startMs: number; endMs: number }> }
   | { type: "reorder_clips"; expectedVersion: number; actor: Actor; clipIds: string[] }
   | { type: "move_clip"; expectedVersion: number; actor: Actor; clipId: string; timelineStartMs: number }
@@ -268,7 +268,9 @@ export function applyCommand(state: ProjectState, command: EditorCommand): Proje
     case "delete_clip": {
       const clip = next.clips[clipIndex];
       assertNotProtected(state, { startMs: clip.sourceInMs, endMs: clip.sourceOutMs });
+      const rippleMs = command.ripple ? clipDuration(clip) - clip.transition.durationMs : 0;
       next.clips.splice(clipIndex, 1);
+      if (rippleMs) next.clips.slice(clipIndex).forEach((item) => { item.timelineStartMs = Math.max(0, item.timelineStartMs - rippleMs); });
       break;
     }
     case "remove_segments": {

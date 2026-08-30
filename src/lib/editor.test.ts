@@ -17,6 +17,16 @@ describe("editing commands", () => {
     expect(next.version).toBe(1);
   });
 
+  test("supports lift and ripple-delete semantics", () => {
+    let state = createProjectState("00000000-0000-4000-8000-000000000000", "Demo", 5000);
+    state = applyCommand(state, { type: "split_clip", expectedVersion: 0, actor: "human", clipId: state.clips[0].id, sourceMs: 1000 });
+    const firstId = state.clips[0].id;
+    const lifted = applyCommand(state, { type: "delete_clip", expectedVersion: 1, actor: "human", clipId: firstId });
+    const rippled = applyCommand(state, { type: "delete_clip", expectedVersion: 1, actor: "human", clipId: firstId, ripple: true });
+    expect(lifted.clips[0].timelineStartMs).toBe(1000);
+    expect(rippled.clips[0].timelineStartMs).toBe(0);
+  });
+
   test("normalizes clip transforms", () => {
     const state = createProjectState("00000000-0000-4000-8000-000000000000", "Demo", 5000);
     const next = applyCommand(state, { type: "adjust_clip", expectedVersion: 0, actor: "human", clipId: state.clips[0].id, patch: { scaleX: 2, scaleY: 1.5, positionX: 40, positionY: -25 } });

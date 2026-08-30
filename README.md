@@ -18,6 +18,7 @@ A human-first, WebMCP-native video editor. Humans edit through the timeline and 
 - Real FFmpeg MP4 rendering and CMX3600-style EDL export
 - 28 direct WebMCP tools with optimistic version checks
 - Responsive, keyboard-accessible editor UI styled with Tailwind utilities
+- Editor shortcuts: Space play/pause, Backspace lift-delete, Delete ripple-delete, and Cmd/Ctrl+Z undo
 
 No built-in chat or agent is included. Open the app inside a WebMCP-compatible agent browser.
 
