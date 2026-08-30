@@ -166,7 +166,7 @@ function normalizeClip(clip: Clip, durationMs: number): Clip {
     speed: clamp(clip.speed, 0.5, 2), volume: clamp(clip.volume, 0, 2),
     brightness: clamp(clip.brightness, -1, 1), contrast: clamp(clip.contrast, 0, 2),
     saturation: clamp(clip.saturation, 0, 3), hue: clamp(clip.hue, -180, 180),
-    scaleX: clamp(clip.scaleX, 1, 4), scaleY: clamp(clip.scaleY, 1, 4),
+    scaleX: clamp(clip.scaleX, 0.25, 4), scaleY: clamp(clip.scaleY, 0.25, 4),
     positionX: clamp(clip.positionX, -100, 100), positionY: clamp(clip.positionY, -100, 100),
     fadeInMs: clamp(clip.fadeInMs, 0, adjustedDuration / 2),
     fadeOutMs: clamp(clip.fadeOutMs, 0, adjustedDuration / 2),

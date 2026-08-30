@@ -472,9 +472,9 @@ function ClipInspector({ state, clip, dispatch, previewClip, setError }: { state
     <RangeControl label="Hue" value={clip.hue} resetValue={0} min={-180} max={180} step={1} suffix="°" onPreview={(hue) => preview({ hue })} onCommit={(hue) => adjust({ hue })} />
     <h3 className="mx-[-14px] mt-[18px] mb-2.5 border-b border-[#242830] px-3.5 pb-2 text-[9px] tracking-[.12em] text-[#7f8590] uppercase">Transform</h3>
     <div className="grid grid-cols-[1fr_18px_1fr] items-center gap-x-1.5">
-      <RangeControl label="Zoom X" value={clip.scaleX} resetValue={1} min={1} max={4} step={0.05} suffix="×" onPreview={(scaleX) => preview(scalePatch("scaleX", scaleX))} onCommit={(scaleX) => adjust(scalePatch("scaleX", scaleX))} />
+      <RangeControl label="Zoom X" value={clip.scaleX} resetValue={1} min={0.25} max={4} step={0.05} suffix="×" onPreview={(scaleX) => preview(scalePatch("scaleX", scaleX))} onCommit={(scaleX) => adjust(scalePatch("scaleX", scaleX))} />
       <button type="button" className={`mt-4 grid size-[18px] cursor-pointer place-items-center rounded border bg-transparent p-0 ${scaleLocked ? "border-[var(--lime)] text-[var(--lime)]" : "border-[var(--line)] text-[var(--muted)]"}`} aria-label={scaleLocked ? "Unlock zoom aspect ratio" : "Lock zoom aspect ratio"} aria-pressed={scaleLocked} title={scaleLocked ? "Zoom X and Y linked" : "Zoom X and Y independent"} onClick={() => setScaleLocked((locked) => !locked)}>{scaleLocked ? <Link2 className="size-2.5" aria-hidden="true" /> : <Unlink2 className="size-2.5" aria-hidden="true" />}</button>
-      <RangeControl label="Zoom Y" value={clip.scaleY} resetValue={1} min={1} max={4} step={0.05} suffix="×" onPreview={(scaleY) => preview(scalePatch("scaleY", scaleY))} onCommit={(scaleY) => adjust(scalePatch("scaleY", scaleY))} />
+      <RangeControl label="Zoom Y" value={clip.scaleY} resetValue={1} min={0.25} max={4} step={0.05} suffix="×" onPreview={(scaleY) => preview(scalePatch("scaleY", scaleY))} onCommit={(scaleY) => adjust(scalePatch("scaleY", scaleY))} />
     </div>
     <div className="grid grid-cols-2 gap-x-3">
       <RangeControl label="Pan X" value={clip.positionX} resetValue={0} min={-100} max={100} step={1} suffix="%" onPreview={(positionX) => preview({ positionX })} onCommit={(positionX) => adjust({ positionX })} />

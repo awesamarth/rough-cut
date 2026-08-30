@@ -29,8 +29,8 @@ describe("editing commands", () => {
 
   test("normalizes clip transforms", () => {
     const state = createProjectState("00000000-0000-4000-8000-000000000000", "Demo", 5000);
-    const next = applyCommand(state, { type: "adjust_clip", expectedVersion: 0, actor: "human", clipId: state.clips[0].id, patch: { scaleX: 2, scaleY: 1.5, positionX: 40, positionY: -25 } });
-    expect(next.clips[0]).toMatchObject({ scaleX: 2, scaleY: 1.5, positionX: 40, positionY: -25 });
+    const next = applyCommand(state, { type: "adjust_clip", expectedVersion: 0, actor: "human", clipId: state.clips[0].id, patch: { scaleX: 0.1, scaleY: 5, positionX: 40, positionY: -25 } });
+    expect(next.clips[0]).toMatchObject({ scaleX: 0.25, scaleY: 4, positionX: 40, positionY: -25 });
   });
 
   test("trims without rippling and allows non-overlapping gaps", () => {

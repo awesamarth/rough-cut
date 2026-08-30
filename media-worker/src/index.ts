@@ -73,7 +73,7 @@ async function writeAss(file: string, state: ProjectState) {
 function validateState(state: ProjectState) {
   if (!state || !safeProjectId(state.id) || !Array.isArray(state.clips) || !state.clips.length || state.clips.length > 200) throw new Error("Invalid project state");
   for (const clip of state.clips) {
-    if (![clip.timelineStartMs, clip.sourceInMs, clip.sourceOutMs, clip.speed, clip.scaleX, clip.scaleY, clip.positionX, clip.positionY].every(Number.isFinite) || clip.timelineStartMs < 0 || clip.sourceInMs < 0 || clip.sourceOutMs <= clip.sourceInMs || clip.sourceOutMs > state.durationMs || clip.speed < 0.5 || clip.speed > 2 || clip.scaleX < 1 || clip.scaleX > 4 || clip.scaleY < 1 || clip.scaleY > 4 || Math.abs(clip.positionX) > 100 || Math.abs(clip.positionY) > 100) throw new Error("Invalid clip");
+    if (![clip.timelineStartMs, clip.sourceInMs, clip.sourceOutMs, clip.speed, clip.scaleX, clip.scaleY, clip.positionX, clip.positionY].every(Number.isFinite) || clip.timelineStartMs < 0 || clip.sourceInMs < 0 || clip.sourceOutMs <= clip.sourceInMs || clip.sourceOutMs > state.durationMs || clip.speed < 0.5 || clip.speed > 2 || clip.scaleX < 0.25 || clip.scaleX > 4 || clip.scaleY < 0.25 || clip.scaleY > 4 || Math.abs(clip.positionX) > 100 || Math.abs(clip.positionY) > 100) throw new Error("Invalid clip");
   }
 }
 
@@ -108,7 +108,7 @@ async function exportProject(job: Job, state: ProjectState) {
         "fps=30",
         `eq=brightness=${clip.brightness}:contrast=${clip.contrast}:saturation=${clip.saturation}`,
         `hue=h=${clip.hue}`,
-        `scale=trunc(iw*${clip.scaleX}/2)*2:trunc(ih*${clip.scaleY}/2)*2`,
+        `scale=max(2\,trunc(iw*${clip.scaleX}/2)*2):max(2\,trunc(ih*${clip.scaleY}/2)*2)`,
         "format=yuva420p",
       ];
       if (fadeIn > 0) videoFilters.push(`fade=t=in:st=0:d=${seconds(fadeIn)}:alpha=1`);
