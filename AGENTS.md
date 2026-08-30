@@ -61,17 +61,18 @@ Keep schemas narrow, validate all input, and return the new version plus a struc
 - `inspect_frame`
 - `detect_silences`
 
-### Edit
+### Process and edit
 
-- `split_clip`
+- `transcribe_video`
+- `split_clip` / `trim_clip` / `delete_clip`
 - `remove_segments` (batch)
-- `reorder_clips`
-- `adjust_clip` (color, volume, speed)
+- `reorder_clips` / `move_clip`
+- `adjust_clip` (color, transform, volume, speed, fades)
 - `set_transition`
-- `set_captions`
-- `add_text_overlay`
+- `set_captions` / `add_caption` / `remove_caption`
+- `add_text_overlay` / `remove_text_overlay`
 - `protect_segment` / `unprotect_segment`
-- `mark_broll`
+- `mark_broll` / `remove_broll`
 - `undo` / `redo`
 
 ### Output
@@ -132,4 +133,4 @@ No speaker diarization. “Render” means FFmpeg video generation, not Render.c
 
 ## Current status
 
-The editor, versioned command layer, direct WebMCP tools, D1/R2 persistence, Workers AI transcription, local FFmpeg pipeline, authenticated media proxy, exports, tests, public Worker, and public repository are implemented. Local UI review is active: sliders preview live, the playhead/ruler supports click-drag scrubbing, the unified clip lane includes real FFmpeg-derived audio waveforms, preview/timeline/lower panes are vertically resizable, the timeline supports Option/Alt-wheel zoom plus drag-edge auto-scroll, keyboard transport/undo shortcuts work, clips support independent X/Y zoom and pan with matching exports, and the timeline supports explicit gaps, non-ripple edge trims, linked movement, and toggleable edge/playhead snapping. The Cloudflare Container image is deployment-ready but the account must be upgraded to Workers Paid before Cloudflare will accept it. Submission assets still needed: a concise write-up and sub-three-minute YouTube demo.
+The editor, versioned command layer, 28 direct WebMCP tools, D1/R2 persistence, Workers AI transcription, local FFmpeg pipeline, authenticated media proxy, exports, tests, public Worker, and public repository are implemented. Sliders preview live; the playhead/ruler supports click-drag scrubbing; the unified clip lane includes real FFmpeg-derived waveforms; preview/timeline/lower panes are vertically resizable; and the timeline supports Option/Alt-wheel zoom, drag-edge auto-scroll, explicit gaps, non-ripple trims, linked movement, snapping, X/Y zoom and pan, and keyboard transport/undo. Component styling is Tailwind-first, global CSS contains only tokens and base behavior, and editor controls have responsive layouts, keyboard focus indicators, accessible names, and reduced-motion behavior. The Cloudflare Container image is deployment-ready but the account must be upgraded to Workers Paid before Cloudflare will accept it. Submission assets still needed: final write-up review and a sub-three-minute YouTube demo.

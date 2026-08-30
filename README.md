@@ -8,15 +8,16 @@ A human-first, WebMCP-native video editor. Humans edit through the timeline and 
 ## What works
 
 - Chunked video uploads to R2 and durable project revisions in D1
-- Non-destructive split, trim, delete, reorder, protected ranges, undo and redo
-- Brightness, contrast, saturation, hue, volume, mute and speed controls
+- Non-destructive split, non-ripple trim, delete, reorder, explicit gaps, protected ranges, undo and redo
+- Brightness, contrast, saturation, hue, independent X/Y zoom and pan, volume, mute and speed controls
 - Crossfades, fade-through-black, edge fades, captions and text overlays
 - B-roll markers and exact-frame inspection
 - FFmpeg silence detection with configurable speech padding
 - Cloudflare Whisper Large v3 Turbo transcription with word timestamps
 - Optional session-only OpenAI `whisper-1` key
 - Real FFmpeg MP4 rendering and CMX3600-style EDL export
-- Direct WebMCP tools with optimistic version checks
+- 28 direct WebMCP tools with optimistic version checks
+- Responsive, keyboard-accessible editor UI styled with Tailwind utilities
 
 No built-in chat or agent is included. Open the app inside a WebMCP-compatible agent browser.
 
@@ -80,9 +81,18 @@ WebMCP tools ├─ editing commands → D1 revisions
                                           └→ audio chunks → Workers AI transcript
 ```
 
-## WebMCP testing
+## WebMCP tools
 
-Use ChatGPT's in-app browser or enable `chrome://flags/#enable-webmcp-testing`. Open an editor project; tools register only on that page. The activity panel makes human and agent changes visible.
+Open an editor project in ChatGPT's in-app browser or enable `chrome://flags/#enable-webmcp-testing`. Tools register directly through `document.modelContext.registerTool`; no agent SDK or built-in chat is used.
+
+- Inspect: `get_project_state`, `get_transcript`, `search_transcript`, `inspect_frame`, `detect_silences`
+- Process: `transcribe_video`
+- Timeline: `split_clip`, `trim_clip`, `delete_clip`, `remove_segments`, `reorder_clips`, `move_clip`, `adjust_clip`, `set_transition`
+- Text and markers: `set_captions`, `add_caption`, `remove_caption`, `add_text_overlay`, `remove_text_overlay`, `protect_segment`, `unprotect_segment`, `mark_broll`, `remove_broll`
+- History: `undo`, `redo`
+- Output: `render_preview`, `export_mp4`, `export_edl`
+
+Every mutation requires the version returned by `get_project_state`. A stale agent receives `STALE_VERSION:<current>` and must reread before retrying. Human and agent actions call the same command layer, increment the same version, remain undoable, and appear in the activity panel.
 
 ## License
 

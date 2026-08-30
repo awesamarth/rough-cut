@@ -13,6 +13,7 @@ type Handlers = {
   seekTimeline(ms: number): void;
   inspectFrame(ms?: number): { timelineMs: number; image: string };
   detectSilences(thresholdDb?: number, minimumMs?: number): Promise<Array<{ startMs: number; endMs: number }>>;
+  transcribeVideo(actor?: "human" | "agent", expectedVersion?: number): Promise<ProjectState>;
   exportMp4(): Promise<{ jobId: string; downloadUrl: string }>;
   exportEdl(): string;
   setStatus(status: string): void;
@@ -77,9 +78,24 @@ export function useWebMCP(handlers: Handlers) {
         async execute(input) { return { ranges: await current.current.detectSilences(typeof input.threshold_db === "number" ? input.threshold_db : -35, typeof input.minimum_ms === "number" ? input.minimum_ms : 500) }; },
       },
       {
+        name: "transcribe_video", description: "Transcribe the source video with Cloudflare Whisper and save word timestamps. This may take several minutes.",
+        inputSchema: mutationSchema({}),
+        async execute(input) { assertVersion(input); return current.current.transcribeVideo("agent", asNumber(input.expected_version, "expected_version")); },
+      },
+      {
         name: "split_clip", description: "Split one timeline clip at an exact source-media time.",
         inputSchema: mutationSchema({ clip_id: string("Clip ID from get_project_state"), source_ms: number("Source-media split time in milliseconds") }, ["clip_id", "source_ms"]),
         async execute(input) { assertVersion(input); return current.current.dispatch({ type: "split_clip", actor: "agent", clipId: asString(input.clip_id, "clip_id"), sourceMs: asNumber(input.source_ms, "source_ms") }); },
+      },
+      {
+        name: "trim_clip", description: "Set a clip's source in and out points without rippling later clips.",
+        inputSchema: mutationSchema({ clip_id: string("Clip ID"), source_in_ms: number("New source in"), source_out_ms: number("New source out") }, ["clip_id", "source_in_ms", "source_out_ms"]),
+        async execute(input) { assertVersion(input); return current.current.dispatch({ type: "trim_clip", actor: "agent", clipId: asString(input.clip_id, "clip_id"), sourceInMs: asNumber(input.source_in_ms, "source_in_ms"), sourceOutMs: asNumber(input.source_out_ms, "source_out_ms") }); },
+      },
+      {
+        name: "delete_clip", description: "Delete one entire clip. Protected source ranges are rejected.",
+        inputSchema: mutationSchema({ clip_id: string("Clip ID") }, ["clip_id"]), annotations: { destructiveHint: true },
+        async execute(input) { assertVersion(input); return current.current.dispatch({ type: "delete_clip", actor: "agent", clipId: asString(input.clip_id, "clip_id") }); },
       },
       {
         name: "remove_segments", description: "Remove one or more source-media ranges from every matching clip. Protected ranges are rejected.",
@@ -112,9 +128,24 @@ export function useWebMCP(handlers: Handlers) {
         async execute(input) { assertVersion(input); if (!Array.isArray(input.captions)) throw new Error("captions must be an array"); const items = input.captions.map((item) => { const value = item as Record<string, unknown>; const position: "top" | "center" | "bottom" = value.position === "top" || value.position === "center" ? value.position : "bottom"; return { text: asString(value.text, "text"), startMs: asNumber(value.start_ms, "start_ms"), endMs: asNumber(value.end_ms, "end_ms"), position }; }); return current.current.dispatch({ type: "set_captions", actor: "agent", items }); },
       },
       {
+        name: "add_caption", description: "Add one positioned caption without replacing existing captions.",
+        inputSchema: mutationSchema({ text: string("Caption text"), start_ms: number("Timeline start"), end_ms: number("Timeline end"), position: { type: "string", enum: ["top", "center", "bottom"] } }, ["text", "start_ms", "end_ms"]),
+        async execute(input) { assertVersion(input); const position = input.position === "top" || input.position === "center" ? input.position : "bottom"; return current.current.dispatch({ type: "add_caption", actor: "agent", item: { text: asString(input.text, "text"), startMs: asNumber(input.start_ms, "start_ms"), endMs: asNumber(input.end_ms, "end_ms"), position } }); },
+      },
+      {
+        name: "remove_caption", description: "Remove one caption by ID.",
+        inputSchema: mutationSchema({ caption_id: string("Caption ID") }, ["caption_id"]), annotations: { destructiveHint: true },
+        async execute(input) { assertVersion(input); return current.current.dispatch({ type: "remove_caption", actor: "agent", id: asString(input.caption_id, "caption_id") }); },
+      },
+      {
         name: "add_text_overlay", description: "Add a positioned text overlay at timeline timestamps.",
         inputSchema: mutationSchema({ text: string("Overlay text"), start_ms: number("Timeline start"), end_ms: number("Timeline end"), position: { type: "string", enum: ["top", "center", "bottom"] } }, ["text", "start_ms", "end_ms"]),
         async execute(input) { assertVersion(input); const position = input.position === "top" || input.position === "bottom" ? input.position : "center"; return current.current.dispatch({ type: "add_overlay", actor: "agent", item: { text: asString(input.text, "text"), startMs: asNumber(input.start_ms, "start_ms"), endMs: asNumber(input.end_ms, "end_ms"), position } }); },
+      },
+      {
+        name: "remove_text_overlay", description: "Remove one text overlay by ID.",
+        inputSchema: mutationSchema({ overlay_id: string("Overlay ID") }, ["overlay_id"]), annotations: { destructiveHint: true },
+        async execute(input) { assertVersion(input); return current.current.dispatch({ type: "remove_overlay", actor: "agent", id: asString(input.overlay_id, "overlay_id") }); },
       },
       {
         name: "protect_segment", description: "Protect a source range so later destructive edits cannot remove it.",
@@ -129,6 +160,11 @@ export function useWebMCP(handlers: Handlers) {
         name: "mark_broll", description: "Attach a B-roll brief to a spoken source range without generating footage.",
         inputSchema: mutationSchema({ start_ms: number("Source start"), end_ms: number("Source end"), brief: string("Visual brief") }, ["start_ms", "end_ms", "brief"]),
         async execute(input) { assertVersion(input); return current.current.dispatch({ type: "mark_broll", actor: "agent", startMs: asNumber(input.start_ms, "start_ms"), endMs: asNumber(input.end_ms, "end_ms"), label: asString(input.brief, "brief") }); },
+      },
+      {
+        name: "remove_broll", description: "Remove one B-roll marker by ID.",
+        inputSchema: mutationSchema({ marker_id: string("B-roll marker ID") }, ["marker_id"]), annotations: { destructiveHint: true },
+        async execute(input) { assertVersion(input); return current.current.dispatch({ type: "remove_broll", actor: "agent", id: asString(input.marker_id, "marker_id") }); },
       },
       { name: "undo", description: "Undo the latest reversible timeline edit.", inputSchema: mutationSchema({}), async execute(input) { assertVersion(input); return current.current.undo("agent") ?? { unchanged: true }; } },
       { name: "redo", description: "Redo the latest undone timeline edit.", inputSchema: mutationSchema({}), async execute(input) { assertVersion(input); return current.current.redo("agent") ?? { unchanged: true }; } },

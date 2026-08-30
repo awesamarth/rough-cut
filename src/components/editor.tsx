@@ -25,7 +25,7 @@ function downloadText(name: string, text: string, type = "text/plain") {
 
 export function Editor({ projectId }: { projectId: string }) {
   const editor = useEditor(projectId);
-  const { project, state, transcript, dispatch, previewClip, initialize, undo, redo, saveTranscript, saving, lastSavedAt, error, setError } = editor;
+  const { project, state, transcript, dispatch, previewClip, initialize, undo, redo, saveTranscript, saving, lastSavedAt, error, setError, canUndo, canRedo } = editor;
   const videoRef = useRef<HTMLVideoElement>(null);
   const nextVideoRef = useRef<HTMLVideoElement>(null);
   const transitionStarted = useRef(false);
@@ -233,18 +233,19 @@ export function Editor({ projectId }: { projectId: string }) {
   useEffect(() => {
     const shortcuts = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
-      if (target?.closest("input, textarea, select, [contenteditable='true']")) return;
+      const typing = target?.closest("textarea, [contenteditable='true']") || target instanceof HTMLInputElement && ["text", "search", "password", "email", "url", "tel"].includes(target.type);
       if (event.code === "Space" && !event.metaKey && !event.ctrlKey && !event.altKey) {
+        if (typing) return;
         event.preventDefault();
-        (document.activeElement as HTMLElement | null)?.blur();
         if (!event.repeat) togglePlayback();
         return;
       }
+      if (target?.closest("input, textarea, select, [contenteditable='true']")) return;
       const modifier = event.metaKey || event.ctrlKey;
       if (!modifier) return;
       if (event.key.toLowerCase() === "z") {
         event.preventDefault();
-        if (!event.repeat) event.shiftKey ? redo() : undo();
+        if (!event.repeat) { if (event.shiftKey) redo(); else undo(); }
       } else if (event.key.toLowerCase() === "y") {
         event.preventDefault();
         if (!event.repeat) redo();
@@ -313,73 +314,94 @@ export function Editor({ projectId }: { projectId: string }) {
     return result.ranges;
   }, [projectId]);
 
+  const transcribeVideo = useCallback(async (actor: "human" | "agent" = "human", provider: "cloudflare" | "openai" = "cloudflare", apiKey = "", onProgress?: (message: string) => void, expectedVersion?: number) => {
+    onProgress?.("Extracting audio…");
+    const prepResponse = await fetch(`${MEDIA_URL}/transcription/prepare`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ projectId }) });
+    const prep = await prepResponse.json() as { chunks?: Array<{ index: number; offsetMs: number; url: string }>; error?: string };
+    if (!prepResponse.ok || !prep.chunks) throw new Error(prep.error || "Audio extraction failed");
+    const words: TranscriptWord[] = [];
+    for (let index = 0; index < prep.chunks.length; index++) {
+      const chunk = prep.chunks[index];
+      onProgress?.(`Transcribing ${index + 1}/${prep.chunks.length}…`);
+      const audio = await fetch(`${MEDIA_URL}${chunk.url}`).then((response) => response.blob());
+      const form = new FormData(); form.set("audio", audio, `chunk-${index}.mp3`); form.set("provider", provider);
+      const response = await fetch("/api/transcribe", { method: "POST", headers: provider === "openai" ? { "x-openai-key": apiKey } : undefined, body: form });
+      const result = await response.json() as { words?: TranscriptWord[]; error?: string };
+      if (!response.ok || !result.words) throw new Error(result.error || "Transcription failed");
+      words.push(...result.words.map((word) => ({ ...word, id: crypto.randomUUID(), startMs: word.startMs + chunk.offsetMs, endMs: word.endMs + chunk.offsetMs })));
+    }
+    const currentVersion = editor.stateRef.current?.version;
+    if (expectedVersion !== undefined && currentVersion !== expectedVersion) throw new Error(`STALE_VERSION:${currentVersion ?? 0}`);
+    return saveTranscript(words, actor);
+  }, [editor.stateRef, projectId, saveTranscript]);
+
   useWebMCP({
     stateRef: editor.stateRef, transcriptRef: editor.transcriptRef, dispatch, undo, redo,
-    seekTimeline, inspectFrame, detectSilences, exportMp4, exportEdl: exportEdlFile,
+    seekTimeline, inspectFrame, detectSilences, transcribeVideo: (actor, expectedVersion) => transcribeVideo(actor, "cloudflare", "", undefined, expectedVersion), exportMp4, exportEdl: exportEdlFile,
     setStatus: setWebmcpStatus,
   });
 
-  if (!project) return <main className="loading-screen"><div className="spinner" /><p>{error || "Loading project…"}</p></main>;
+  if (!project) return <main className="grid min-h-dvh place-content-center justify-items-center gap-[15px] text-[var(--muted)]"><div className="size-[30px] animate-spin rounded-full border-[3px] border-[#2f333a] border-t-[var(--lime)] motion-reduce:animate-none" /><p>{error || "Loading project…"}</p></main>;
 
   return (
     <main className="grid h-dvh min-h-0 grid-rows-[58px_auto_minmax(0,1fr)_var(--timeline-height)_var(--lower-height)] overflow-hidden bg-[var(--bg)] max-[900px]:h-auto max-[900px]:min-h-dvh max-[900px]:grid-rows-[auto_auto_auto_180px_290px] max-[900px]:overflow-visible" style={{ "--timeline-height": `${timelineHeight}px`, "--lower-height": `${lowerHeight}px` } as React.CSSProperties}>
-      <header className="editor-header row-start-1">
-        <Link href="/" className="brand small"><span>ROUGH</span><i>{"//"}</i><span>CUT</span></Link>
-        <div className="project-title"><strong>{state?.name ?? project.name}</strong><SaveStatus saving={saving} savedAt={lastSavedAt} ready={!!state} /></div>
-        <div className="header-actions">
-          <span className={`webmcp-badge ${webmcpStatus === "Ready" ? "ready" : ""}`}><b /> WebMCP {webmcpStatus}</span>
-          <button className="ghost-button" onClick={() => state && downloadText(`${state.name}.edl`, exportEdl(state))}>EDL</button>
-          <button className="primary-button compact" disabled={!state || !!exportStatus && exportStatus !== "Export complete"} onClick={() => void exportMp4().catch((cause) => { setError(cause.message); setExportStatus(""); })}>{exportStatus || "Export MP4"}</button>
+      <header className="row-start-1 grid grid-cols-[220px_1fr_auto] items-center gap-5 border-b border-[var(--line)] bg-[#0d0f12] px-[18px] max-[900px]:min-h-[58px] max-[900px]:grid-cols-[auto_1fr] max-[900px]:p-2.5">
+        <Link href="/" className="inline-flex items-center gap-[.22em] text-[17px] font-black tracking-[-.07em] text-white no-underline"><span>ROUGH</span><i className="not-italic text-[var(--orange)]">{"//"}</i><span>CUT</span></Link>
+        <div className="flex min-w-0 items-baseline gap-2.5"><strong className="overflow-hidden text-[13px] text-ellipsis whitespace-nowrap">{state?.name ?? project.name}</strong><span className="text-[10px] text-[var(--muted)] max-[900px]:hidden"><SaveStatus saving={saving} savedAt={lastSavedAt} ready={!!state} /></span></div>
+        <div className="flex items-center gap-2.25 max-[900px]:col-span-full max-[900px]:flex-wrap">
+          <span className="inline-flex items-center gap-1.75 rounded-full border border-[#323740] px-2.5 py-1.5 text-[11px] tracking-[.08em] text-[var(--muted)] uppercase"><b className={`size-1.75 rounded-full ${webmcpStatus === "Ready" ? "bg-[var(--lime)] shadow-[0_0_8px_var(--lime)]" : "bg-[#666]"}`} /> WebMCP {webmcpStatus}</span>
+          <button className="cursor-pointer rounded-[7px] border border-[var(--line)] bg-transparent px-3 py-1.75" onClick={() => state && downloadText(`${state.name}.edl`, exportEdl(state))}>EDL</button>
+          <button className="cursor-pointer rounded-[7px] border-0 bg-[var(--lime)] px-[13px] py-2 text-xs font-extrabold text-[#10120d] shadow-[0_8px_30px_#d9ff6324] hover:bg-[#e5ff93]" disabled={!state || !!exportStatus && exportStatus !== "Export complete"} onClick={() => void exportMp4().catch((cause) => { setError(cause.message); setExportStatus(""); })}>{exportStatus || "Export MP4"}</button>
         </div>
       </header>
 
-      {error && <div className="error-banner row-start-2" role="alert">{error}<button onClick={() => setError("")}>×</button></div>}
+      {error && <div className="row-start-2 flex justify-between border-b border-[#7c3024] bg-[#401c17] px-[18px] py-2 text-xs text-[#ff9781]" role="alert">{error}<button className="cursor-pointer border-0 bg-transparent" aria-label="Dismiss error" onClick={() => setError("")}>×</button></div>}
 
       <section className="row-start-3 grid min-h-0 grid-cols-[minmax(0,1fr)_280px] max-[900px]:grid-cols-1">
         <div className="flex min-h-0 min-w-0 flex-col items-center justify-center overflow-hidden bg-[radial-gradient(circle,_#1b1e24_0,_#0e1013_70%)] p-3 max-[900px]:overflow-visible max-[900px]:p-2.5">
           <div className="preview-stage relative aspect-video h-[min(calc(100%_-_42px),506px)] w-auto max-w-full flex-none overflow-hidden rounded-[5px] bg-black shadow-[0_20px_60px_#0009] max-[900px]:h-auto max-[900px]:w-full">
             <video
-              ref={videoRef} src={`/api/projects/${projectId}/media`} playsInline preload="metadata"
+              ref={videoRef} src={`/api/projects/${projectId}/media`} playsInline preload="metadata" aria-label="Video preview" className="block size-full object-contain"
               style={{ filter: cssFilter(activeClip), transform: cssTransform(activeClip) }}
               onLoadedMetadata={(event) => { initialize(event.currentTarget.duration * 1000); requestAnimationFrame(ensureInitialSeek); }}
               onTimeUpdate={updatePlayback}
               onPlay={() => { setIsPlaying(true); if (transitionStarted.current) void nextVideoRef.current?.play(); }}
               onPause={() => { if (gapFrame.current === null) setIsPlaying(false); nextVideoRef.current?.pause(); }}
             />
-            <video ref={nextVideoRef} src={`/api/projects/${projectId}/media`} playsInline preload="metadata" muted={false} className="transition-video" style={{ opacity: secondaryOpacity, filter: cssFilter(nextClip), transform: cssTransform(nextClip) }} />
-            <div className="black-transition" style={{ opacity: blackOpacity }} />
-            {state?.overlays.filter((item) => playheadMs >= item.startMs && playheadMs <= item.endMs).map((item) => <div key={item.id} className={`preview-text ${item.position}`}>{item.text}</div>)}
-            {state?.captions.filter((item) => playheadMs >= item.startMs && playheadMs <= item.endMs).map((item) => <div key={item.id} className="preview-caption">{item.text}</div>)}
-            <button className="frame-button" onClick={() => { try { inspectFrame(); } catch (cause) { setError((cause as Error).message); } }} title="Capture current frame">▣</button>
+            <video ref={nextVideoRef} src={`/api/projects/${projectId}/media`} playsInline preload="metadata" muted={false} aria-hidden="true" className="pointer-events-none absolute inset-0 block size-full object-contain" style={{ opacity: secondaryOpacity, filter: cssFilter(nextClip), transform: cssTransform(nextClip) }} />
+            <div className="pointer-events-none absolute inset-0 bg-black" style={{ opacity: blackOpacity }} />
+            {state?.overlays.filter((item) => playheadMs >= item.startMs && playheadMs <= item.endMs).map((item) => <div key={item.id} className={`absolute left-1/2 z-4 max-w-[88%] -translate-x-1/2 rounded-[5px] bg-[#000b] px-3.5 py-2 text-center text-[clamp(18px,3vw,42px)] font-extrabold text-shadow-[0_2px_3px_#000] ${item.position === "top" ? "top-[8%]" : item.position === "bottom" ? "bottom-[8%]" : "top-1/2 -translate-y-1/2"}`}>{item.text}</div>)}
+            {state?.captions.filter((item) => playheadMs >= item.startMs && playheadMs <= item.endMs).map((item) => <div key={item.id} className="absolute bottom-[7%] left-1/2 z-4 max-w-[88%] -translate-x-1/2 rounded-[5px] bg-[#000b] px-3.5 py-2 text-center text-[clamp(16px,2.3vw,30px)] font-extrabold text-shadow-[0_2px_3px_#000]">{item.text}</div>)}
+            <button className="absolute top-2.5 right-2.5 z-5 cursor-pointer rounded-md border border-[#ffffff38] bg-[#080808aa] px-2.25 py-1.5" aria-label="Capture current frame" onClick={() => { try { inspectFrame(); } catch (cause) { setError((cause as Error).message); } }} title="Capture current frame">▣</button>
           </div>
-          <div className="transport">
-            <button onClick={() => seekTimeline(Math.max(0, playheadMs - 5000))}>−5s</button>
-            <button className="play-button" onClick={togglePlayback}>{isPlaying ? "Ⅱ" : "▶"}</button>
-            <button onClick={() => seekTimeline(Math.min(totalMs, playheadMs + 5000))}>+5s</button>
-            <code>{formatTime(playheadMs)} <span>/ {formatTime(totalMs)}</span></code>
-            <input aria-label="Playhead" type="range" min={0} max={Math.max(1, totalMs)} value={playheadMs} onChange={(event) => seekTimeline(Number(event.target.value))} />
+          <div className="flex w-[min(100%,900px)] items-center gap-2 pt-3">
+            <button className="cursor-pointer rounded-[5px] border border-[var(--line)] bg-[var(--panel-2)] px-2.25 py-1.5 text-[11px]" aria-label="Seek backward 5 seconds" onClick={() => seekTimeline(Math.max(0, playheadMs - 5000))}>−5s</button>
+            <button className="w-[34px] cursor-pointer rounded-[5px] border border-[var(--line)] bg-[#e8e9ea] px-2.25 py-1.5 text-[11px] text-[#111]" aria-label={isPlaying ? "Pause" : "Play"} aria-pressed={isPlaying} onClick={togglePlayback}>{isPlaying ? "Ⅱ" : "▶"}</button>
+            <button className="cursor-pointer rounded-[5px] border border-[var(--line)] bg-[var(--panel-2)] px-2.25 py-1.5 text-[11px]" aria-label="Seek forward 5 seconds" onClick={() => seekTimeline(Math.min(totalMs, playheadMs + 5000))}>+5s</button>
+            <code className="min-w-[115px] text-[11px] text-[#d7d9dd]">{formatTime(playheadMs)} <span className="text-[#686e78]">/ {formatTime(totalMs)}</span></code>
+            <input className="min-w-0 flex-1 accent-[var(--lime)]" aria-label="Playhead" type="range" min={0} max={Math.max(1, totalMs)} value={playheadMs} onChange={(event) => seekTimeline(Number(event.target.value))} />
           </div>
         </div>
 
-        <aside className="inspector">
-          <div className="panel-heading"><span>Inspector</span>{selectedClip && <code>{formatTime(clipDuration(selectedClip))}</code>}</div>
-          {state && selectedClip ? <ClipInspector state={state} clip={selectedClip} dispatch={dispatch} previewClip={previewClip} setError={setError} /> : <p className="empty-copy">Select a clip to adjust it.</p>}
+        <aside className="min-h-0 overflow-auto border-l border-[var(--line)] bg-[var(--panel)] max-[900px]:max-h-[330px] max-[900px]:border-t max-[900px]:border-l-0" aria-label="Clip inspector">
+          <div className="sticky top-0 z-2 flex justify-between border-b border-[var(--line)] bg-[#14161b] px-[13px] py-[11px] text-[10px] tracking-[.14em] text-[#c7cad0] uppercase"><span>Inspector</span>{selectedClip && <code className="text-[var(--muted)]">{formatTime(clipDuration(selectedClip))}</code>}</div>
+          {state && selectedClip ? <ClipInspector state={state} clip={selectedClip} dispatch={dispatch} previewClip={previewClip} setError={setError} /> : <p className="p-8 text-center text-xs text-[var(--muted)]">Select a clip to adjust it.</p>}
         </aside>
       </section>
 
       <section className="relative row-start-4 grid min-h-0 min-w-0 grid-rows-[39px_minmax(0,1fr)] overflow-hidden border-y border-[var(--line)] bg-[#0e1014]">
         <button type="button" aria-label="Resize preview and timeline" title="Drag to resize preview and timeline" className="group absolute top-0 left-0 z-20 hidden h-2 w-full touch-none cursor-row-resize border-0 bg-transparent p-0 min-[901px]:block" onPointerDown={(event) => startResize("preview", event)}><span className="absolute top-0 left-1/2 h-px w-12 -translate-x-1/2 bg-[#3a4049] transition-colors group-hover:bg-[var(--lime)]" /></button>
-        <div className="timeline-toolbar">
-          <div>
-            <button aria-label={isPlaying ? "Pause" : "Play"} title={isPlaying ? "Pause" : "Play"} className="inline-flex w-8 justify-center" onClick={togglePlayback}>{isPlaying ? "Ⅱ" : "▶"}</button>
-            <button onClick={splitAtPlayhead}>⌁ Split</button>
-            <button disabled={!selectedClip} onClick={() => selectedClip && dispatch({ type: "delete_clip", actor: "human", clipId: selectedClip.id })}>⌫ Delete</button>
-            <button aria-pressed={effectiveSnapEnabled} title="Toggle timeline snapping (hold Option/Alt to temporarily invert)" className={`inline-flex items-center gap-1.5 ${effectiveSnapEnabled ? "!border-[var(--lime)] !text-[var(--lime)]" : ""}`} onClick={() => setSnapEnabled((enabled) => !enabled)}><Magnet className="size-3" aria-hidden="true" /> Snap</button>
+        <div className="flex h-[39px] items-center justify-between border-b border-[var(--line)] px-3">
+          <div className="flex items-center gap-1.5">
+            <button aria-label={isPlaying ? "Pause" : "Play"} aria-pressed={isPlaying} title={isPlaying ? "Pause" : "Play"} className="inline-flex w-8 cursor-pointer justify-center rounded-[5px] border border-[var(--line)] bg-[var(--panel-2)] px-2.25 py-1.5 text-[11px]" onClick={togglePlayback}>{isPlaying ? "Ⅱ" : "▶"}</button>
+            <button className="cursor-pointer rounded-[5px] border border-[var(--line)] bg-[var(--panel-2)] px-2.25 py-1.5 text-[11px]" onClick={splitAtPlayhead}>⌁ Split</button>
+            <button className="cursor-pointer rounded-[5px] border border-[var(--line)] bg-[var(--panel-2)] px-2.25 py-1.5 text-[11px]" disabled={!selectedClip} onClick={() => selectedClip && dispatch({ type: "delete_clip", actor: "human", clipId: selectedClip.id })}>⌫ Delete</button>
+            <button aria-pressed={effectiveSnapEnabled} title="Toggle timeline snapping (hold Option/Alt to temporarily invert)" className={`inline-flex cursor-pointer items-center gap-1.5 rounded-[5px] border border-[var(--line)] bg-[var(--panel-2)] px-2.25 py-1.5 text-[11px] ${effectiveSnapEnabled ? "!border-[var(--lime)] !text-[var(--lime)]" : ""}`} onClick={() => setSnapEnabled((enabled) => !enabled)}><Magnet className="size-3" aria-hidden="true" /> Snap</button>
           </div>
-          <div>
-            <button onClick={() => undo()}>↶ Undo</button>
-            <button onClick={() => redo()}>↷ Redo</button>
-            <span>{state?.clips.length ?? 0} clips · {formatTime(totalMs)}</span>
+          <div className="flex items-center gap-1.5">
+            <button className="cursor-pointer rounded-[5px] border border-[var(--line)] bg-[var(--panel-2)] px-2.25 py-1.5 text-[11px]" disabled={!canUndo} aria-label="Undo last edit" onClick={() => undo()}>↶ Undo</button>
+            <button className="cursor-pointer rounded-[5px] border border-[var(--line)] bg-[var(--panel-2)] px-2.25 py-1.5 text-[11px]" disabled={!canRedo} aria-label="Redo last edit" onClick={() => redo()}>↷ Redo</button>
+            <span className="ml-2 text-[10px] text-[var(--muted)]">{state?.clips.length ?? 0} clips · {formatTime(totalMs)}</span>
           </div>
         </div>
         {state && <Timeline state={state} waveform={waveform} snapEnabled={snapEnabled} isPlaying={isPlaying} playheadMs={playheadMs} selectedClipId={selectedClip?.id ?? ""} onSelect={setSelectedClipId} onSeek={seekTimeline} dispatch={dispatch} setError={setError} />}
@@ -387,24 +409,24 @@ export function Editor({ projectId }: { projectId: string }) {
 
       <section className="relative row-start-5 grid min-h-0 grid-rows-[36px_1fr] overflow-hidden bg-[var(--panel)]">
         <button type="button" aria-label="Resize timeline and transcript" title="Drag to resize timeline and transcript" className="group absolute top-0 left-0 z-20 hidden h-2 w-full touch-none cursor-row-resize border-0 bg-transparent p-0 min-[901px]:block" onPointerDown={(event) => startResize("timeline", event)}><span className="absolute top-0 left-1/2 h-px w-12 -translate-x-1/2 bg-[#3a4049] transition-colors group-hover:bg-[var(--lime)]" /></button>
-        <div className="lower-tabs">
-          {(["transcript", "text", "silence", "activity"] as const).map((name) => <button key={name} className={tab === name ? "active" : ""} onClick={() => setTab(name)}>{name}</button>)}
+        <div className="flex gap-[18px] border-b border-[var(--line)] px-3" role="tablist" aria-label="Editor panels">
+          {(["transcript", "text", "silence", "activity"] as const).map((name) => <button key={name} role="tab" aria-selected={tab === name} className={`cursor-pointer border-0 border-b-2 bg-transparent text-[9px] tracking-[.12em] uppercase ${tab === name ? "border-[var(--lime)] text-white" : "border-transparent text-[#777e89]"}`} onClick={() => setTab(name)}>{name}</button>)}
         </div>
-        <div className="lower-content">
-          {tab === "transcript" && state && <TranscriptPanel state={state} transcript={transcript} playheadMs={playheadMs} dispatch={dispatch} saveTranscript={saveTranscript} seekTimeline={seekTimeline} projectId={projectId} setError={setError} />}
+        <div className="min-h-0 overflow-auto" role="tabpanel">
+          {tab === "transcript" && state && <TranscriptPanel state={state} transcript={transcript} playheadMs={playheadMs} dispatch={dispatch} transcribeVideo={transcribeVideo} seekTimeline={seekTimeline} setError={setError} />}
           {tab === "text" && state && <TextPanel state={state} playheadMs={playheadMs} dispatch={dispatch} />}
           {tab === "silence" && state && <SilencePanel transcript={transcript} detect={detectSilences} dispatch={dispatch} setError={setError} />}
           {tab === "activity" && state && <ActivityPanel state={state} />}
         </div>
       </section>
 
-      {frame && <div className="frame-modal" onClick={() => setFrame(null)}><div onClick={(event) => event.stopPropagation()}><button onClick={() => setFrame(null)}>×</button><img src={frame} alt={`Captured frame at ${formatTime(playheadMs)}`} /><p>Frame at {formatTime(playheadMs)}</p></div></div>}
+      {frame && <div className="fixed inset-0 z-30 grid place-items-center bg-[#000d] p-5" role="dialog" aria-modal="true" aria-label="Captured frame" onClick={() => setFrame(null)}><div className="relative max-w-[960px] rounded-lg border border-[#444] bg-[#111] p-2" onClick={(event) => event.stopPropagation()}><button className="absolute top-3 right-3 size-[30px] cursor-pointer rounded-full border-0 bg-[#000c]" aria-label="Close captured frame" onClick={() => setFrame(null)}>×</button><img className="block max-w-full" src={frame} alt={`Captured frame at ${formatTime(playheadMs)}`} /><p className="mx-1 mt-2 mb-0.5 font-mono text-[10px] text-[var(--muted)]">Frame at {formatTime(playheadMs)}</p></div></div>}
     </main>
   );
 }
 
 function SaveStatus({ saving, savedAt, ready }: { saving: boolean; savedAt: number | null; ready: boolean }) {
-  const [now, setNow] = useState(Date.now());
+  const [now, setNow] = useState(savedAt ?? 0);
   useEffect(() => { const timer = window.setInterval(() => setNow(Date.now()), 10_000); return () => window.clearInterval(timer); }, []);
   if (saving) return <span>Saving…</span>;
   if (!ready || !savedAt) return <span>Preparing timeline</span>;
@@ -417,39 +439,40 @@ function RangeControl({ label, value, resetValue, min, max, step, suffix = "", o
   const [draft, setDraft] = useState(value);
   useEffect(() => setDraft(value), [value]);
   const reset = () => { const next = Math.max(min, Math.min(max, resetValue)); setDraft(next); onPreview?.(next); onCommit(next); };
-  return <label className="my-2.5 block"><span className="flex items-center justify-between text-[10px] leading-none text-[#a6abb4]">{label}<span className="flex h-4 items-center gap-1"><output className="inline-flex h-4 items-center font-mono leading-none text-[#f3f3f4]">{draft}{suffix}</output><button type="button" className="inline-flex size-4 cursor-pointer items-center justify-center border-0 bg-transparent p-0 text-[#858b96] hover:text-(--lime) focus-visible:text-(--lime)" title={`Reset ${label}`} aria-label={`Reset ${label}`} onClick={(event) => { event.preventDefault(); reset(); }}><RotateCcw className="size-2.5 -translate-y-[0.5px] shrink-0" strokeWidth={2} aria-hidden="true" /></button></span></span><input className="h-0.75 w-full accent-(--lime)" type="range" min={min} max={max} step={step} value={draft} onChange={(event) => { const next = Number(event.target.value); setDraft(next); onPreview?.(next); }} onPointerUp={() => onCommit(draft)} onKeyUp={() => onCommit(draft)} /></label>;
+  return <label className="my-2.5 block"><span className="flex items-center justify-between text-[10px] leading-none text-[#a6abb4]">{label}<span className="flex h-4 items-center gap-1"><output className="inline-flex h-4 items-center font-mono leading-none text-[#f3f3f4]">{draft}{suffix}</output><button type="button" className="inline-flex size-4 cursor-pointer items-center justify-center border-0 bg-transparent p-0 text-[#858b96] hover:text-(--lime) focus-visible:text-(--lime)" title={`Reset ${label}`} aria-label={`Reset ${label}`} onClick={(event) => { event.preventDefault(); reset(); }}><RotateCcw className="size-2.5 -translate-y-[0.5px] shrink-0" strokeWidth={2} aria-hidden="true" /></button></span></span><input className="h-0.75 w-full accent-(--lime)" type="range" min={min} max={max} step={step} value={draft} onChange={(event) => { const next = Number(event.target.value); setDraft(next); onPreview?.(next); }} onPointerUp={() => onCommit(draft)} onKeyUp={(event) => { if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"].includes(event.key)) onCommit(draft); }} /></label>;
 }
 
 function ClipInspector({ state, clip, dispatch, previewClip, setError }: { state: ProjectState; clip: Clip; dispatch(command: CommandInput): ProjectState; previewClip(clipId: string, patch: Partial<Clip>): void; setError(message: string): void }) {
   const preview = (patch: Partial<Clip>) => previewClip(clip.id, patch);
   const adjust = (patch: Partial<Clip>) => { try { dispatch({ type: "adjust_clip", actor: "human", clipId: clip.id, patch }); } catch (cause) { setError((cause as Error).message); } };
   const next = state.clips[state.clips.findIndex((item) => item.id === clip.id) + 1];
-  return <div className="inspector-form">
-    <div className="trim-fields">
-      <label>In<input key={`${clip.id}-in-${clip.sourceInMs}`} type="number" defaultValue={Math.round(clip.sourceInMs)} onBlur={(event) => { const value = Number(event.target.value); if (value < clip.sourceOutMs && value !== clip.sourceInMs) dispatch({ type: "trim_clip", actor: "human", clipId: clip.id, sourceInMs: value, sourceOutMs: clip.sourceOutMs }); }} /></label>
-      <label>Out<input key={`${clip.id}-out-${clip.sourceOutMs}`} type="number" defaultValue={Math.round(clip.sourceOutMs)} onBlur={(event) => { const value = Number(event.target.value); if (value > clip.sourceInMs && value !== clip.sourceOutMs) dispatch({ type: "trim_clip", actor: "human", clipId: clip.id, sourceInMs: clip.sourceInMs, sourceOutMs: value }); }} /></label>
+  const trim = (sourceInMs: number, sourceOutMs: number) => { try { dispatch({ type: "trim_clip", actor: "human", clipId: clip.id, sourceInMs, sourceOutMs }); } catch (cause) { setError((cause as Error).message); } };
+  return <div className="px-3.5 pt-3 pb-[30px]">
+    <div className="grid grid-cols-2 gap-1.75">
+      <label className="text-[9px] text-[var(--muted)] uppercase">In<input className="mt-1 w-full rounded-[5px] border border-[var(--line)] bg-[#0c0e11] p-1.5 text-white" key={`${clip.id}-in-${clip.sourceInMs}`} type="number" min={0} max={clip.sourceOutMs - 50} defaultValue={Math.round(clip.sourceInMs)} onBlur={(event) => { const value = Number(event.target.value); if (value < clip.sourceOutMs && value !== clip.sourceInMs) trim(value, clip.sourceOutMs); }} /></label>
+      <label className="text-[9px] text-[var(--muted)] uppercase">Out<input className="mt-1 w-full rounded-[5px] border border-[var(--line)] bg-[#0c0e11] p-1.5 text-white" key={`${clip.id}-out-${clip.sourceOutMs}`} type="number" min={clip.sourceInMs + 50} max={state.durationMs} defaultValue={Math.round(clip.sourceOutMs)} onBlur={(event) => { const value = Number(event.target.value); if (value > clip.sourceInMs && value !== clip.sourceOutMs) trim(clip.sourceInMs, value); }} /></label>
     </div>
-    <h3>Color</h3>
+    <h3 className="mx-[-14px] mt-[18px] mb-2.5 border-b border-[#242830] px-3.5 pb-2 text-[9px] tracking-[.12em] text-[#7f8590] uppercase">Color</h3>
     <RangeControl label="Brightness" value={clip.brightness} resetValue={0} min={-1} max={1} step={0.05} onPreview={(brightness) => preview({ brightness })} onCommit={(brightness) => adjust({ brightness })} />
     <RangeControl label="Contrast" value={clip.contrast} resetValue={1} min={0} max={2} step={0.05} onPreview={(contrast) => preview({ contrast })} onCommit={(contrast) => adjust({ contrast })} />
     <RangeControl label="Saturation" value={clip.saturation} resetValue={1} min={0} max={3} step={0.05} onPreview={(saturation) => preview({ saturation })} onCommit={(saturation) => adjust({ saturation })} />
     <RangeControl label="Hue" value={clip.hue} resetValue={0} min={-180} max={180} step={1} suffix="°" onPreview={(hue) => preview({ hue })} onCommit={(hue) => adjust({ hue })} />
-    <h3>Transform</h3>
+    <h3 className="mx-[-14px] mt-[18px] mb-2.5 border-b border-[#242830] px-3.5 pb-2 text-[9px] tracking-[.12em] text-[#7f8590] uppercase">Transform</h3>
     <div className="grid grid-cols-2 gap-x-3">
       <RangeControl label="Zoom X" value={clip.scaleX} resetValue={1} min={1} max={4} step={0.05} suffix="×" onPreview={(scaleX) => preview({ scaleX })} onCommit={(scaleX) => adjust({ scaleX })} />
       <RangeControl label="Zoom Y" value={clip.scaleY} resetValue={1} min={1} max={4} step={0.05} suffix="×" onPreview={(scaleY) => preview({ scaleY })} onCommit={(scaleY) => adjust({ scaleY })} />
       <RangeControl label="Pan X" value={clip.positionX} resetValue={0} min={-100} max={100} step={1} suffix="%" onPreview={(positionX) => preview({ positionX })} onCommit={(positionX) => adjust({ positionX })} />
       <RangeControl label="Pan Y" value={clip.positionY} resetValue={0} min={-100} max={100} step={1} suffix="%" onPreview={(positionY) => preview({ positionY })} onCommit={(positionY) => adjust({ positionY })} />
     </div>
-    <h3>Playback</h3>
+    <h3 className="mx-[-14px] mt-[18px] mb-2.5 border-b border-[#242830] px-3.5 pb-2 text-[9px] tracking-[.12em] text-[#7f8590] uppercase">Playback</h3>
     <RangeControl label="Volume" value={clip.volume} resetValue={1} min={0} max={2} step={0.05} onPreview={(volume) => preview({ volume })} onCommit={(volume) => adjust({ volume })} />
     <RangeControl label="Speed" value={clip.speed} resetValue={1} min={0.5} max={2} step={0.05} suffix="×" onPreview={(speed) => preview({ speed })} onCommit={(speed) => adjust({ speed })} />
-    <label className="check-row"><input type="checkbox" checked={clip.muted} onChange={(event) => adjust({ muted: event.target.checked })} /> Mute clip</label>
-    <h3>Fades</h3>
+    <label className="flex items-center gap-1.75 text-[11px] text-[#a6abb4]"><input type="checkbox" checked={clip.muted} onChange={(event) => adjust({ muted: event.target.checked })} /> Mute clip</label>
+    <h3 className="mx-[-14px] mt-[18px] mb-2.5 border-b border-[#242830] px-3.5 pb-2 text-[9px] tracking-[.12em] text-[#7f8590] uppercase">Fades</h3>
     <RangeControl label="Fade in" value={clip.fadeInMs} resetValue={0} min={0} max={Math.min(3000, clipDuration(clip) / 2)} step={50} suffix="ms" onPreview={(fadeInMs) => preview({ fadeInMs })} onCommit={(fadeInMs) => adjust({ fadeInMs })} />
     <RangeControl label="Fade out" value={clip.fadeOutMs} resetValue={0} min={0} max={Math.min(3000, clipDuration(clip) / 2)} step={50} suffix="ms" onPreview={(fadeOutMs) => preview({ fadeOutMs })} onCommit={(fadeOutMs) => adjust({ fadeOutMs })} />
-    <h3>Transition</h3>
-    <select disabled={!next} value={clip.transition.type} onChange={(event) => dispatch({ type: "set_transition", actor: "human", clipId: clip.id, transition: { type: event.target.value as Clip["transition"]["type"], durationMs: event.target.value === "cut" ? 0 : Math.max(300, clip.transition.durationMs) } })}>
+    <h3 className="mx-[-14px] mt-[18px] mb-2.5 border-b border-[#242830] px-3.5 pb-2 text-[9px] tracking-[.12em] text-[#7f8590] uppercase">Transition</h3>
+    <select className="w-full rounded-[5px] border border-[var(--line)] bg-[#0e1014] p-1.75 text-[11px]" aria-label="Transition type" disabled={!next} value={clip.transition.type} onChange={(event) => dispatch({ type: "set_transition", actor: "human", clipId: clip.id, transition: { type: event.target.value as Clip["transition"]["type"], durationMs: event.target.value === "cut" ? 0 : Math.max(300, clip.transition.durationMs) } })}>
       <option value="cut">Hard cut</option><option value="crossfade">Crossfade</option><option value="fade-black">Fade through black</option>
     </select>
     {clip.transition.type !== "cut" && next && <RangeControl label="Duration" value={clip.transition.durationMs} resetValue={500} min={100} max={Math.min(3000, clipDuration(clip) / 2, clipDuration(next) / 2)} step={50} suffix="ms" onPreview={(durationMs) => preview({ transition: { ...clip.transition, durationMs } })} onCommit={(durationMs) => dispatch({ type: "set_transition", actor: "human", clipId: clip.id, transition: { ...clip.transition, durationMs } })} />}
@@ -502,23 +525,22 @@ function Timeline({ state, waveform, snapEnabled, isPlaying, playheadMs, selecte
     setViewportWidth(Math.max(1, viewport.clientWidth - 20));
     return () => observer.disconnect();
   }, []);
-  const zoomTimeline = (event: WheelEvent) => {
-    if (!event.altKey || !scrollRef.current || naturalWidth <= 0) return;
-    event.preventDefault();
-    const container = scrollRef.current;
-    const rect = container.getBoundingClientRect();
-    const pointerX = event.clientX - rect.left;
-    const timelineRatio = (container.scrollLeft + pointerX) / Math.max(1, trackWidth);
-    const availableWidth = Math.max(1, container.clientWidth - 20);
-    const minimum = Math.min(1, availableWidth / naturalWidth);
-    const next = Math.max(minimum, Math.min(12, zoom * Math.exp(-event.deltaY * 0.003)));
-    const nextWidth = Math.max(availableWidth, naturalWidth * next);
-    setZoom(next);
-    requestAnimationFrame(() => { container.scrollLeft = Math.max(0, timelineRatio * nextWidth - pointerX); });
-  };
   useEffect(() => {
     const container = scrollRef.current;
     if (!container) return;
+    const zoomTimeline = (event: WheelEvent) => {
+      if (!event.altKey || naturalWidth <= 0) return;
+      event.preventDefault();
+      const rect = container.getBoundingClientRect();
+      const pointerX = event.clientX - rect.left;
+      const timelineRatio = (container.scrollLeft + pointerX) / Math.max(1, trackWidth);
+      const availableWidth = Math.max(1, container.clientWidth - 20);
+      const minimum = Math.min(1, availableWidth / naturalWidth);
+      const next = Math.max(minimum, Math.min(12, zoom * Math.exp(-event.deltaY * 0.003)));
+      const nextWidth = Math.max(availableWidth, naturalWidth * next);
+      setZoom(next);
+      requestAnimationFrame(() => { container.scrollLeft = Math.max(0, timelineRatio * nextWidth - pointerX); });
+    };
     container.addEventListener("wheel", zoomTimeline, { passive: false });
     return () => container.removeEventListener("wheel", zoomTimeline);
   }, [naturalWidth, trackWidth, zoom]);
@@ -596,16 +618,12 @@ function Timeline({ state, waveform, snapEnabled, isPlaying, playheadMs, selecte
     };
     const finish = (pointer: { clientX: number; altKey: boolean }) => {
       move(pointer);
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
       setMoving(null);
       if (moved && Math.abs(destination - originalStart) >= 1) {
         try { dispatch({ type: "move_clip", actor: "human", clipId: clip.id, timelineStartMs: Math.round(destination) }); }
         catch (cause) { setError((cause as Error).message); }
       }
     };
-    document.body.style.cursor = "grabbing";
-    document.body.style.userSelect = "none";
     trackDrag(event, move, finish);
   };
   const trim = (event: React.PointerEvent, clip: Clip, edge: "in" | "out") => {
@@ -635,15 +653,11 @@ function Timeline({ state, waveform, snapEnabled, isPlaying, playheadMs, selecte
     };
     const move = (pointer: { clientX: number; altKey: boolean }) => setTrimming(calculate(pointer));
     const finish = (up: { clientX: number; altKey: boolean }) => {
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
       const result = calculate(up);
       setTrimming(null);
       if (Math.abs(result.sourceInMs - startIn) < 1 && Math.abs(result.sourceOutMs - startOut) < 1) return;
       try { dispatch({ type: "trim_clip", actor: "human", clipId: clip.id, sourceInMs: result.sourceInMs, sourceOutMs: result.sourceOutMs }); } catch (cause) { setError((cause as Error).message); }
     };
-    document.body.style.cursor = "ew-resize";
-    document.body.style.userSelect = "none";
     trackDrag(event, move, finish);
   };
   const dragPlayhead = (event: React.PointerEvent) => {
@@ -654,7 +668,7 @@ function Timeline({ state, waveform, snapEnabled, isPlaying, playheadMs, selecte
     update(event);
     trackDrag(event, update, update);
   };
-  return <div ref={scrollRef} className="relative min-h-0 select-none overflow-auto px-2.5 pt-[21px] pb-2"><div ref={trackRef} className="timeline-track relative h-full min-h-[60px] min-w-full rounded-[5px]" style={{ width }} onClick={(event) => seekAt(event.clientX, event.currentTarget)}>
+  return <div ref={scrollRef} className="relative min-h-0 select-none overflow-auto px-2.5 pt-[21px] pb-2"><div ref={trackRef} className="timeline-track relative h-full min-h-[60px] min-w-full rounded-[5px] [background:repeating-linear-gradient(90deg,#16191e_0,#16191e_139px,#1c2026_140px)]" style={{ width }} onClick={(event) => seekAt(event.clientX, event.currentTarget)}>
     <div className="absolute -top-[21px] left-0 z-[6] h-[21px] w-full overflow-hidden text-[8px] font-mono text-[#7f8590]" style={{ backgroundImage: "linear-gradient(to right, #3a4049 1px, transparent 1px)", backgroundSize: `${minorWidth}px 6px`, backgroundPosition: "left bottom", backgroundRepeat: "repeat-x" }}>
       {rulerMarks.map((time) => <span key={time} className="pointer-events-none absolute bottom-1 h-[17px] border-l border-[#68707c] pl-1 leading-none" style={{ left: `${time / total * 100}%` }}>{formatTimelineTime(time)}</span>)}
       <button type="button" aria-label="Scrub timeline" title="Click or drag to scrub" tabIndex={-1} className="absolute inset-0 size-full touch-none cursor-ew-resize select-none border-0 bg-transparent p-0 outline-none" onPointerDown={dragPlayhead} />
@@ -677,7 +691,7 @@ function Timeline({ state, waveform, snapEnabled, isPlaying, playheadMs, selecte
   </div></div>;
 }
 
-function TranscriptPanel({ state, transcript, playheadMs, dispatch, saveTranscript, seekTimeline, projectId, setError }: { state: ProjectState; transcript: TranscriptWord[]; playheadMs: number; dispatch(command: CommandInput): ProjectState; saveTranscript(words: TranscriptWord[]): ProjectState; seekTimeline(ms: number): void; projectId: string; setError(message: string): void }) {
+function TranscriptPanel({ state, transcript, playheadMs, dispatch, transcribeVideo, seekTimeline, setError }: { state: ProjectState; transcript: TranscriptWord[]; playheadMs: number; dispatch(command: CommandInput): ProjectState; transcribeVideo(actor?: "human" | "agent", provider?: "cloudflare" | "openai", apiKey?: string, onProgress?: (message: string) => void): Promise<ProjectState>; seekTimeline(ms: number): void; setError(message: string): void }) {
   const [query, setQuery] = useState("");
   const [selection, setSelection] = useState<[number, number] | null>(null);
   const [provider, setProvider] = useState<"cloudflare" | "openai">("cloudflare");
@@ -686,25 +700,9 @@ function TranscriptPanel({ state, transcript, playheadMs, dispatch, saveTranscri
   const visible = transcript.filter((word) => !query || word.word.toLowerCase().includes(query.toLowerCase()));
 
   async function transcribe() {
-    setProcessing("Extracting audio…"); setError("");
-    try {
-      const prepResponse = await fetch(`${MEDIA_URL}/transcription/prepare`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ projectId }) });
-      const prep = await prepResponse.json() as { chunks?: Array<{ index: number; offsetMs: number; url: string }>; error?: string };
-      if (!prepResponse.ok || !prep.chunks) throw new Error(prep.error || "Audio extraction failed");
-      const words: TranscriptWord[] = [];
-      for (let index = 0; index < prep.chunks.length; index++) {
-        const chunk = prep.chunks[index];
-        setProcessing(`Transcribing ${index + 1}/${prep.chunks.length}…`);
-        const audio = await fetch(`${MEDIA_URL}${chunk.url}`).then((response) => response.blob());
-        const form = new FormData(); form.set("audio", audio, `chunk-${index}.mp3`); form.set("provider", provider);
-        const response = await fetch("/api/transcribe", { method: "POST", headers: provider === "openai" ? { "x-openai-key": apiKey } : undefined, body: form });
-        const result = await response.json() as { words?: TranscriptWord[]; error?: string };
-        if (!response.ok || !result.words) throw new Error(result.error || "Transcription failed");
-        words.push(...result.words.map((word) => ({ ...word, id: crypto.randomUUID(), startMs: word.startMs + chunk.offsetMs, endMs: word.endMs + chunk.offsetMs })));
-      }
-      saveTranscript(words);
-      setProcessing("");
-    } catch (cause) { setProcessing(""); setError(cause instanceof Error ? cause.message : "Transcription failed"); }
+    setError("");
+    try { await transcribeVideo("human", provider, apiKey, setProcessing); setProcessing(""); }
+    catch (cause) { setProcessing(""); setError(cause instanceof Error ? cause.message : "Transcription failed"); }
   }
 
   const selectedRange = selection && transcript.length ? { startMs: transcript[Math.min(...selection)].startMs, endMs: transcript[Math.max(...selection)].endMs } : null;
@@ -721,23 +719,24 @@ function TranscriptPanel({ state, transcript, playheadMs, dispatch, saveTranscri
     dispatch({ type: "set_captions", actor: "human", items });
   }
 
-  return <div className="transcript-panel">
-    <div className="panel-actions">
-      <input placeholder="Search transcript" value={query} onChange={(event) => setQuery(event.target.value)} />
+  return <div>
+    <div className="sticky top-0 z-2 flex min-h-12 items-center gap-1.75 overflow-x-auto border-b border-[var(--line)] bg-[#13161bef] px-3 py-1.75 max-[900px]:flex-wrap">
+      <input className="min-w-[180px] rounded-md border border-[var(--line)] bg-[#0b0d10] px-2.25 py-1.75 text-[11px] text-white" aria-label="Search transcript" placeholder="Search transcript" value={query} onChange={(event) => setQuery(event.target.value)} />
       {transcript.length ? <>
-        <button disabled={!selectedRange} onClick={() => selectedRange && dispatch({ type: "protect_segment", actor: "human", ...selectedRange, label: "Protected by human" })}>Protect selection</button>
-        <button disabled={!selectedRange} onClick={() => selectedRange && dispatch({ type: "remove_segments", actor: "human", ranges: [selectedRange] })}>Cut selection</button>
-        <button onClick={generateCaptions}>Generate captions</button>
+        <button className="cursor-pointer whitespace-nowrap rounded-md border border-[#333944] bg-[#20242b] px-2.5 py-1.75 text-[10px]" disabled={!selectedRange} onClick={() => selectedRange && dispatch({ type: "protect_segment", actor: "human", ...selectedRange, label: "Protected by human" })}>Protect selection</button>
+        <button className="cursor-pointer whitespace-nowrap rounded-md border border-[#333944] bg-[#20242b] px-2.5 py-1.75 text-[10px]" disabled={!selectedRange} onClick={() => selectedRange && dispatch({ type: "remove_segments", actor: "human", ranges: [selectedRange] })}>Cut selection</button>
+        <button className="cursor-pointer whitespace-nowrap rounded-md border border-[#333944] bg-[#20242b] px-2.5 py-1.75 text-[10px]" onClick={generateCaptions}>Generate captions</button>
       </> : <>
-        <select value={provider} onChange={(event) => setProvider(event.target.value as typeof provider)}><option value="cloudflare">Cloudflare Whisper Large v3</option><option value="openai">OpenAI whisper-1 (your key)</option></select>
-        {provider === "openai" && <input type="password" autoComplete="off" placeholder="Session-only OpenAI key" value={apiKey} onChange={(event) => setApiKey(event.target.value)} />}
-        <button className="primary-button compact !shadow-none" disabled={!!processing || provider === "openai" && !apiKey} onClick={() => void transcribe()}>{processing || "Transcribe video"}</button>
+        <select className="w-auto rounded-[5px] border border-[var(--line)] bg-[#0e1014] p-1.75 text-[11px]" aria-label="Transcription provider" value={provider} onChange={(event) => setProvider(event.target.value as typeof provider)}><option value="cloudflare">Cloudflare Whisper Large v3</option><option value="openai">OpenAI whisper-1 (your key)</option></select>
+        {provider === "openai" && <input className="min-w-[180px] rounded-md border border-[var(--line)] bg-[#0b0d10] px-2.25 py-1.75 text-[11px] text-white" aria-label="Session-only OpenAI API key" type="password" autoComplete="off" placeholder="Session-only OpenAI key" value={apiKey} onChange={(event) => setApiKey(event.target.value)} />}
+        <button className="cursor-pointer whitespace-nowrap rounded-[7px] border-0 bg-[var(--lime)] px-[13px] py-2 text-xs font-extrabold text-[#10120d] hover:bg-[#e5ff93]" disabled={!!processing || provider === "openai" && !apiKey} onClick={() => void transcribe()} aria-live="polite">{processing || "Transcribe video"}</button>
       </>}
     </div>
-    {transcript.length ? <div className="transcript-words">{visible.map((word) => {
+    {transcript.length ? <div className="p-3.5 leading-[2.05]">{visible.map((word) => {
       const index = transcript.indexOf(word); const selected = selection && index >= Math.min(...selection) && index <= Math.max(...selection);
-      return <button key={word.id} className={`${selected ? "selected" : ""} ${word.startMs <= playheadMs && word.endMs >= playheadMs ? "current" : ""}`} onClick={(event) => { if (event.shiftKey && selection) setSelection([selection[0], index]); else setSelection([index, index]); const clip = timelineClips(state).find((entry) => word.startMs >= entry.clip.sourceInMs && word.startMs <= entry.clip.sourceOutMs); if (clip) seekTimeline(clip.startMs + (word.startMs - clip.clip.sourceInMs) / clip.clip.speed); }}>{word.word}</button>;
-    })}</div> : <div className="empty-copy">Transcribe to unlock text search, transcript cuts, and automatic captions.</div>}
+      const current = word.startMs <= playheadMs && word.endMs >= playheadMs;
+      return <button key={word.id} aria-pressed={!!selected} className={`cursor-pointer rounded-[3px] border-0 px-1 py-0.75 hover:bg-[#2c3139] ${selected ? "bg-[#5d681f] text-white" : "bg-transparent text-[#c7cad0]"} ${current ? "!text-[var(--lime)]" : ""}`} onClick={(event) => { if (event.shiftKey && selection) setSelection([selection[0], index]); else setSelection([index, index]); const clip = timelineClips(state).find((entry) => word.startMs >= entry.clip.sourceInMs && word.startMs <= entry.clip.sourceOutMs); if (clip) seekTimeline(clip.startMs + (word.startMs - clip.clip.sourceInMs) / clip.clip.speed); }}>{word.word}</button>;
+    })}</div> : <div className="p-8 text-center text-xs text-[var(--muted)]">Transcribe to unlock text search, transcript cuts, and automatic captions.</div>}
   </div>;
 }
 
@@ -756,21 +755,27 @@ function TextPanel({ state, playheadMs, dispatch }: { state: ProjectState; playh
     }
     setText("");
   };
-  return <div className="text-panel">
-    <div className="text-form"><select value={kind} onChange={(event) => setKind(event.target.value as typeof kind)}><option value="overlay">Text overlay</option><option value="caption">Caption</option><option value="broll">B-roll marker</option><option value="protect">Protected range</option></select><input placeholder="Text or marker brief" value={text} onChange={(event) => setText(event.target.value)} />{(kind === "caption" || kind === "overlay") && <select value={position} onChange={(event) => setPosition(event.target.value as typeof position)}><option value="top">Top</option><option value="center">Center</option><option value="bottom">Bottom</option></select>}<input type="number" min={100} step={100} value={duration} onChange={(event) => setDuration(Number(event.target.value))} /><button onClick={add}>Add at {formatTime(playheadMs)}</button></div>
+  return <div>
+    <div className="sticky top-0 z-2 flex min-h-12 items-center gap-1.75 overflow-x-auto border-b border-[var(--line)] bg-[#13161bef] px-3 py-1.75 max-[900px]:flex-wrap">
+      <select className="w-auto rounded-[5px] border border-[var(--line)] bg-[#0e1014] p-1.75 text-[11px]" aria-label="Marker type" value={kind} onChange={(event) => setKind(event.target.value as typeof kind)}><option value="overlay">Text overlay</option><option value="caption">Caption</option><option value="broll">B-roll marker</option><option value="protect">Protected range</option></select>
+      <input className="min-w-[180px] flex-1 rounded-md border border-[var(--line)] bg-[#0b0d10] px-2.25 py-1.75 text-[11px] text-white" aria-label="Text or marker brief" placeholder="Text or marker brief" value={text} onChange={(event) => setText(event.target.value)} />
+      {(kind === "caption" || kind === "overlay") && <select className="w-auto rounded-[5px] border border-[var(--line)] bg-[#0e1014] p-1.75 text-[11px]" aria-label="Text position" value={position} onChange={(event) => setPosition(event.target.value as typeof position)}><option value="top">Top</option><option value="center">Center</option><option value="bottom">Bottom</option></select>}
+      <input className="min-w-[100px] rounded-md border border-[var(--line)] bg-[#0b0d10] px-2.25 py-1.75 text-[11px] text-white" aria-label="Duration in milliseconds" type="number" min={100} step={100} value={duration} onChange={(event) => setDuration(Number(event.target.value))} />
+      <button className="cursor-pointer whitespace-nowrap rounded-md border border-[#333944] bg-[#20242b] px-2.5 py-1.75 text-[10px]" onClick={add}>Add at {formatTime(playheadMs)}</button>
+    </div>
     <MarkerList state={state} dispatch={dispatch} />
   </div>;
 }
 
 function MarkerList({ state, dispatch }: { state: ProjectState; dispatch(command: CommandInput): ProjectState }) {
-  return <div className="marker-list">
+  return <div className="grid grid-cols-[repeat(auto-fill,minmax(260px,1fr))] gap-1.75 p-3">
     {state.overlays.map((item) => <Marker key={item.id} label={`Text · ${item.text}`} range={item} onRemove={() => dispatch({ type: "remove_overlay", actor: "human", id: item.id })} />)}
     {state.captions.map((item) => <Marker key={item.id} label={`Caption · ${item.text}`} range={item} onRemove={() => dispatch({ type: "remove_caption", actor: "human", id: item.id })} />)}
     {state.broll.map((item) => <Marker key={item.id} label={`B-roll · ${item.label}`} range={item} onRemove={() => dispatch({ type: "remove_broll", actor: "human", id: item.id })} />)}
     {state.protectedRanges.map((item) => <Marker key={item.id} label={`Protected · ${item.label}`} range={item} onRemove={() => dispatch({ type: "unprotect_segment", actor: "human", rangeId: item.id })} />)}
   </div>;
 }
-function Marker({ label, range, onRemove }: { label: string; range: Pick<SourceRange, "startMs" | "endMs">; onRemove(): void }) { return <div><span><b>{label}</b><small>{formatTime(range.startMs)} → {formatTime(range.endMs)}</small></span><button onClick={onRemove}>×</button></div>; }
+function Marker({ label, range, onRemove }: { label: string; range: Pick<SourceRange, "startMs" | "endMs">; onRemove(): void }) { return <div className="flex justify-between rounded-md border border-[var(--line)] border-l-[3px] border-l-[var(--blue)] bg-[#171a20] p-2.25"><span className="flex min-w-0 flex-col gap-1"><b className="overflow-hidden text-[11px] text-ellipsis whitespace-nowrap">{label}</b><small className="font-mono text-[9px] text-[var(--muted)]">{formatTime(range.startMs)} → {formatTime(range.endMs)}</small></span><button className="cursor-pointer border-0 bg-transparent text-[var(--muted)]" aria-label={`Remove ${label}`} onClick={onRemove}>×</button></div>; }
 
 function SilencePanel({ transcript, detect, dispatch, setError }: { transcript: TranscriptWord[]; detect(threshold: number, minimum: number): Promise<Array<{ startMs: number; endMs: number }>>; dispatch(command: CommandInput): ProjectState; setError(message: string): void }) {
   const [threshold, setThreshold] = useState(-35); const [minimum, setMinimum] = useState(500); const [padding, setPadding] = useState(200);
@@ -780,7 +785,7 @@ function SilencePanel({ transcript, detect, dispatch, setError }: { transcript: 
     const removals = ranges.filter((_, index) => selected.has(index)).map((range) => ({ startMs: range.startMs + padding, endMs: range.endMs - padding })).filter((range) => range.endMs - range.startMs >= 50);
     try { dispatch({ type: "remove_segments", actor: "human", ranges: removals }); setRanges([]); } catch (cause) { setError((cause as Error).message); }
   };
-  return <div className="silence-panel"><div className="silence-controls"><RangeControl label="Threshold" value={threshold} resetValue={-35} min={-60} max={-10} step={1} suffix="dB" onCommit={setThreshold} /><RangeControl label="Minimum" value={minimum} resetValue={500} min={100} max={3000} step={100} suffix="ms" onCommit={setMinimum} /><RangeControl label="Speech padding" value={padding} resetValue={200} min={0} max={500} step={25} suffix="ms" onCommit={setPadding} /><button className="primary-button compact" disabled={working} onClick={() => void scan()}>{working ? "Scanning audio…" : "Find silences"}</button></div>{ranges.length > 0 && <><div className="silence-ranges">{ranges.map((range, index) => <label key={`${range.startMs}-${range.endMs}`}><input type="checkbox" checked={selected.has(index)} onChange={() => setSelected((current) => { const next = new Set(current); if (next.has(index)) next.delete(index); else next.add(index); return next; })} /><span>{formatTime(range.startMs)} → {formatTime(range.endMs)}</span><b>{((range.endMs - range.startMs) / 1000).toFixed(1)}s</b></label>)}</div><button onClick={apply}>Remove {selected.size} selected silences</button></>}</div>;
+  return <div className="p-3"><div className="grid grid-cols-[repeat(3,minmax(130px,1fr))_auto] items-end gap-[18px] max-[900px]:grid-cols-2"><RangeControl label="Threshold" value={threshold} resetValue={-35} min={-60} max={-10} step={1} suffix="dB" onCommit={setThreshold} /><RangeControl label="Minimum" value={minimum} resetValue={500} min={100} max={3000} step={100} suffix="ms" onCommit={setMinimum} /><RangeControl label="Speech padding" value={padding} resetValue={200} min={0} max={500} step={25} suffix="ms" onCommit={setPadding} /><button className="cursor-pointer rounded-[7px] border-0 bg-[var(--lime)] px-[13px] py-2 text-xs font-extrabold text-[#10120d] hover:bg-[#e5ff93]" disabled={working} onClick={() => void scan()} aria-live="polite">{working ? "Scanning audio…" : "Find silences"}</button></div>{ranges.length > 0 && <><div className="my-3 grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-1.5">{ranges.map((range, index) => <label className="flex items-center gap-2 rounded-[5px] border border-[var(--line)] p-2 text-[10px]" key={`${range.startMs}-${range.endMs}`}><input type="checkbox" checked={selected.has(index)} onChange={() => setSelected((current) => { const next = new Set(current); if (next.has(index)) next.delete(index); else next.add(index); return next; })} /><span className="flex-1 text-[#bdc1c8]">{formatTime(range.startMs)} → {formatTime(range.endMs)}</span><b className="text-[var(--lime)]">{((range.endMs - range.startMs) / 1000).toFixed(1)}s</b></label>)}</div><button className="cursor-pointer whitespace-nowrap rounded-md border border-[#333944] bg-[#20242b] px-2.5 py-1.75 text-[10px]" onClick={apply}>Remove {selected.size} selected silences</button></>}</div>;
 }
 
-function ActivityPanel({ state }: { state: ProjectState }) { return <div className="activity-list">{state.activity.length ? state.activity.map((item) => <div key={item.id}><span className={item.actor}>{item.actor.slice(0, 1)}</span><p><b>{item.summary}</b><small>{new Date(item.at).toLocaleTimeString()}</small></p></div>) : <p className="empty-copy">Edits from you and your agent will appear here.</p>}</div>; }
+function ActivityPanel({ state }: { state: ProjectState }) { return <div className="px-3.5 py-2.5">{state.activity.length ? state.activity.map((item) => <div className="flex gap-2.5 border-b border-[#20242a] py-1.75" key={item.id}><span className={`grid size-[25px] place-items-center rounded-full text-[9px] uppercase ${item.actor === "agent" ? "bg-[#3c451d] text-[var(--lime)]" : "bg-[#29303a]"}`}>{item.actor.slice(0, 1)}</span><p className="m-0 flex flex-col gap-0.75 text-[11px]"><b>{item.summary}</b><small className="text-[9px] text-[var(--muted)]">{new Date(item.at).toLocaleTimeString()}</small></p></div>) : <p className="p-8 text-center text-xs text-[var(--muted)]">Edits from you and your agent will appear here.</p>}</div>; }

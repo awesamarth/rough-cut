@@ -43,18 +43,18 @@ export function Uploader() {
 
   return (
     <div
-      className={`upload-zone ${dragging ? "is-dragging" : ""}`}
+      className={`mt-10.5 flex min-h-[230px] flex-col items-center justify-center rounded-[18px] border border-dashed p-[30px] text-center transition duration-200 ${dragging ? "scale-[1.01] border-[var(--lime)] bg-[#1b2114]" : "border-[#3a404a] bg-[#121419cc]"}`}
       onDragOver={(event) => { event.preventDefault(); setDragging(true); }}
       onDragLeave={() => setDragging(false)}
       onDrop={(event) => { event.preventDefault(); setDragging(false); const file = event.dataTransfer.files[0]; if (file) void upload(file); }}
     >
       <input ref={inputRef} hidden type="file" accept="video/*" onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file); }} />
-      <div className="upload-icon" aria-hidden>↗</div>
-      <h2>{progress === null ? "Drop a video here" : progress === 100 ? "Opening editor…" : "Uploading source…"}</h2>
-      <p>{progress === null ? "MP4, WebM, MOV and other video formats" : `${progress}% uploaded`}</p>
-      {progress !== null && <div className="progress-track"><span style={{ width: `${progress}%` }} /></div>}
-      {progress === null && <button className="primary-button" onClick={() => inputRef.current?.click()}>Choose video</button>}
-      {error && <p className="error-text" role="alert">{error}</p>}
+      <div className="grid size-11 place-items-center rounded-xl bg-[#252a31] text-2xl text-[var(--lime)]" aria-hidden>↗</div>
+      <h2 className="mt-2 mb-1.25 text-[19px]">{progress === null ? "Drop a video here" : progress === 100 ? "Opening editor…" : "Uploading source…"}</h2>
+      <p className="mt-0 mb-[18px] text-[13px] text-[var(--muted)]">{progress === null ? "MP4, WebM, MOV and other video formats" : `${progress}% uploaded`}</p>
+      {progress !== null && <div className="h-1.25 w-[min(400px,90%)] overflow-hidden rounded-[9px] bg-[#292d33]" role="progressbar" aria-label="Upload progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}><span className="block h-full bg-[var(--lime)] transition-[width] duration-250" style={{ width: `${progress}%` }} /></div>}
+      {progress === null && <button className="cursor-pointer rounded-[10px] border-0 bg-[var(--lime)] px-5 py-[13px] font-extrabold text-[#10120d] shadow-[0_8px_30px_#d9ff6324] hover:bg-[#e5ff93]" onClick={() => inputRef.current?.click()}>Choose video</button>}
+      {error && <p className="mt-4 text-[#ff9781]" role="alert">{error}</p>}
     </div>
   );
 }
