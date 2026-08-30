@@ -108,8 +108,7 @@ async function exportProject(job: Job, state: ProjectState) {
         "fps=30",
         `eq=brightness=${clip.brightness}:contrast=${clip.contrast}:saturation=${clip.saturation}`,
         `hue=h=${clip.hue}`,
-        `scale=iw*${clip.scaleX}:ih*${clip.scaleY}`,
-        `crop=iw/${clip.scaleX}:ih/${clip.scaleY}:(iw-ow)/2*${1 - clip.positionX / 100}:(ih-oh)/2*${1 - clip.positionY / 100}`,
+        `scale=trunc(iw*${clip.scaleX}/2)*2:trunc(ih*${clip.scaleY}/2)*2`,
         "format=yuva420p",
       ];
       if (fadeIn > 0) videoFilters.push(`fade=t=in:st=0:d=${seconds(fadeIn)}:alpha=1`);
@@ -129,7 +128,7 @@ async function exportProject(job: Job, state: ProjectState) {
     clips.forEach((clip, index) => {
       const nextVideo = `vx${index}`;
       const end = clip.timelineStartMs + (clip.sourceOutMs - clip.sourceInMs) / clip.speed;
-      filters.push(`[${video}][v${index}]overlay=eof_action=pass:shortest=0:enable='between(t,${seconds(clip.timelineStartMs)},${seconds(end)})'[${nextVideo}]`);
+      filters.push(`[${video}][v${index}]overlay=x='(main_w-overlay_w)/2+main_w*${clip.positionX}/100':y='(main_h-overlay_h)/2+main_h*${clip.positionY}/100':eof_action=pass:shortest=0:enable='between(t,${seconds(clip.timelineStartMs)},${seconds(end)})'[${nextVideo}]`);
       video = nextVideo;
     });
     let audioLabel = "";

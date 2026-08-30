@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Magnet, RotateCcw, Volume2, VolumeX } from "lucide-react";
+import { Link2, Magnet, RotateCcw, Unlink2, Volume2, VolumeX } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { clipDuration, timelineClips, timelineDuration, timelineToSource, type Clip, type ProjectState, type SourceRange, type TimedText, type TranscriptWord } from "@/lib/editor";
 import { exportEdl } from "@/lib/edl";
@@ -14,7 +14,7 @@ const formatTime = (ms: number) => {
   return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(Math.floor(seconds % 60)).padStart(2, "0")}.${String(Math.floor((seconds % 1) * 10))}`;
 };
 const cssFilter = (clip?: Clip) => clip ? `brightness(${1 + clip.brightness}) contrast(${clip.contrast}) saturate(${clip.saturation}) hue-rotate(${clip.hue}deg)` : undefined;
-const cssTransform = (clip?: Clip) => clip ? `translate(${clip.positionX * (clip.scaleX - 1) / 2}%, ${clip.positionY * (clip.scaleY - 1) / 2}%) scale(${clip.scaleX}, ${clip.scaleY})` : undefined;
+const cssTransform = (clip?: Clip) => clip ? `translate(${clip.positionX}%, ${clip.positionY}%) scale(${clip.scaleX}, ${clip.scaleY})` : undefined;
 
 function downloadText(name: string, text: string, type = "text/plain") {
   const url = URL.createObjectURL(new Blob([text], { type }));
@@ -233,16 +233,19 @@ export function Editor({ projectId }: { projectId: string }) {
   useEffect(() => {
     const shortcuts = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
-      const typing = target?.closest("textarea, [contenteditable='true']") || target instanceof HTMLInputElement && ["text", "search", "password", "email", "url", "tel"].includes(target.type);
+      const input = target instanceof HTMLInputElement ? target : null;
+      const textField = !!target?.closest("textarea, [contenteditable='true']") || !!input && ["text", "search", "password", "email", "url", "tel"].includes(input.type);
+      const textEditing = textField || input?.type === "number";
+      const blur = () => (document.activeElement as HTMLElement | null)?.blur();
       if (event.code === "Space" && !event.metaKey && !event.ctrlKey && !event.altKey) {
-        if (typing) return;
-        event.preventDefault();
+        if (textField) return;
+        event.preventDefault(); blur();
         if (!event.repeat) togglePlayback();
         return;
       }
-      if (target?.closest("input, textarea, select, [contenteditable='true']")) return;
       if ((event.key === "Backspace" || event.key === "Delete") && !event.metaKey && !event.ctrlKey && !event.altKey) {
-        event.preventDefault();
+        if (textEditing) return;
+        event.preventDefault(); blur();
         if (!event.repeat && selectedClip) {
           try { dispatch({ type: "delete_clip", actor: "human", clipId: selectedClip.id, ripple: event.key === "Delete" }); }
           catch (cause) { setError(cause instanceof Error ? cause.message : "Could not delete clip"); }
@@ -250,12 +253,12 @@ export function Editor({ projectId }: { projectId: string }) {
         return;
       }
       const modifier = event.metaKey || event.ctrlKey;
-      if (!modifier) return;
+      if (!modifier || textField) return;
       if (event.key.toLowerCase() === "z") {
-        event.preventDefault();
+        event.preventDefault(); blur();
         if (!event.repeat) { if (event.shiftKey) redo(); else undo(); }
       } else if (event.key.toLowerCase() === "y") {
-        event.preventDefault();
+        event.preventDefault(); blur();
         if (!event.repeat) redo();
       }
     };
@@ -451,8 +454,10 @@ function RangeControl({ label, value, resetValue, min, max, step, suffix = "", o
 }
 
 function ClipInspector({ state, clip, dispatch, previewClip, setError }: { state: ProjectState; clip: Clip; dispatch(command: CommandInput): ProjectState; previewClip(clipId: string, patch: Partial<Clip>): void; setError(message: string): void }) {
+  const [scaleLocked, setScaleLocked] = useState(true);
   const preview = (patch: Partial<Clip>) => previewClip(clip.id, patch);
   const adjust = (patch: Partial<Clip>) => { try { dispatch({ type: "adjust_clip", actor: "human", clipId: clip.id, patch }); } catch (cause) { setError((cause as Error).message); } };
+  const scalePatch = (axis: "scaleX" | "scaleY", value: number) => scaleLocked ? { scaleX: value, scaleY: value } : { [axis]: value };
   const next = state.clips[state.clips.findIndex((item) => item.id === clip.id) + 1];
   const trim = (sourceInMs: number, sourceOutMs: number) => { try { dispatch({ type: "trim_clip", actor: "human", clipId: clip.id, sourceInMs, sourceOutMs }); } catch (cause) { setError((cause as Error).message); } };
   return <div className="px-3.5 pt-3 pb-[30px]">
@@ -466,9 +471,12 @@ function ClipInspector({ state, clip, dispatch, previewClip, setError }: { state
     <RangeControl label="Saturation" value={clip.saturation} resetValue={1} min={0} max={3} step={0.05} onPreview={(saturation) => preview({ saturation })} onCommit={(saturation) => adjust({ saturation })} />
     <RangeControl label="Hue" value={clip.hue} resetValue={0} min={-180} max={180} step={1} suffix="°" onPreview={(hue) => preview({ hue })} onCommit={(hue) => adjust({ hue })} />
     <h3 className="mx-[-14px] mt-[18px] mb-2.5 border-b border-[#242830] px-3.5 pb-2 text-[9px] tracking-[.12em] text-[#7f8590] uppercase">Transform</h3>
+    <div className="grid grid-cols-[1fr_18px_1fr] items-center gap-x-1.5">
+      <RangeControl label="Zoom X" value={clip.scaleX} resetValue={1} min={1} max={4} step={0.05} suffix="×" onPreview={(scaleX) => preview(scalePatch("scaleX", scaleX))} onCommit={(scaleX) => adjust(scalePatch("scaleX", scaleX))} />
+      <button type="button" className={`mt-4 grid size-[18px] cursor-pointer place-items-center rounded border bg-transparent p-0 ${scaleLocked ? "border-[var(--lime)] text-[var(--lime)]" : "border-[var(--line)] text-[var(--muted)]"}`} aria-label={scaleLocked ? "Unlock zoom aspect ratio" : "Lock zoom aspect ratio"} aria-pressed={scaleLocked} title={scaleLocked ? "Zoom X and Y linked" : "Zoom X and Y independent"} onClick={() => setScaleLocked((locked) => !locked)}>{scaleLocked ? <Link2 className="size-2.5" aria-hidden="true" /> : <Unlink2 className="size-2.5" aria-hidden="true" />}</button>
+      <RangeControl label="Zoom Y" value={clip.scaleY} resetValue={1} min={1} max={4} step={0.05} suffix="×" onPreview={(scaleY) => preview(scalePatch("scaleY", scaleY))} onCommit={(scaleY) => adjust(scalePatch("scaleY", scaleY))} />
+    </div>
     <div className="grid grid-cols-2 gap-x-3">
-      <RangeControl label="Zoom X" value={clip.scaleX} resetValue={1} min={1} max={4} step={0.05} suffix="×" onPreview={(scaleX) => preview({ scaleX })} onCommit={(scaleX) => adjust({ scaleX })} />
-      <RangeControl label="Zoom Y" value={clip.scaleY} resetValue={1} min={1} max={4} step={0.05} suffix="×" onPreview={(scaleY) => preview({ scaleY })} onCommit={(scaleY) => adjust({ scaleY })} />
       <RangeControl label="Pan X" value={clip.positionX} resetValue={0} min={-100} max={100} step={1} suffix="%" onPreview={(positionX) => preview({ positionX })} onCommit={(positionX) => adjust({ positionX })} />
       <RangeControl label="Pan Y" value={clip.positionY} resetValue={0} min={-100} max={100} step={1} suffix="%" onPreview={(positionY) => preview({ positionY })} onCommit={(positionY) => adjust({ positionY })} />
     </div>
@@ -693,7 +701,7 @@ function Timeline({ state, waveform, snapEnabled, isPlaying, playheadMs, selecte
       onClick={(event) => { event.stopPropagation(); if (!moving) seekAt(event.clientX, event.currentTarget); }}
     >
       <button data-trim-handle className={`absolute top-0 left-0 z-[3] h-full w-[9px] cursor-ew-resize rounded-l border-0 bg-[var(--lime)] ${selectedClipId === clip.id ? "opacity-[.85]" : "opacity-0 group-hover:opacity-[.85]"}`} aria-label="Trim clip start" onClick={(event) => event.stopPropagation()} onPointerDown={(event) => trim(event, clip, "in")} />
-      <div className={`relative flex size-full items-center gap-2 overflow-hidden bg-gradient-to-br from-[#293341] to-[#1d252f] px-2.5 ${index === 0 ? "rounded-l-[5px]" : ""} ${index === entries.length - 1 ? "rounded-r-[5px]" : ""} ${selectedClipId === clip.id ? "shadow-[inset_0_0_0_2px_var(--lime)]" : ""}`}><AudioWaveform peaks={waveform} clip={trimming?.clipId === clip.id ? { ...clip, sourceInMs: trimming.sourceInMs, sourceOutMs: trimming.sourceOutMs } : clip} durationMs={state.durationMs} /><b className="relative z-[1] grid size-[22px] shrink-0 place-items-center rounded bg-[#202731cc] text-[10px]">V{index + 1}</b><span className="relative z-[1] font-mono text-[10px] text-[#c0c6cf]">{formatTime(trimming?.clipId === clip.id ? trimming.durationMs : durationMs)}</span>{clip.muted ? <VolumeX className="relative z-[1] ml-auto size-3 shrink-0 text-[#829b96]" aria-hidden="true" /> : <Volume2 className="relative z-[1] ml-auto size-3 shrink-0 text-[#76c7b7]" aria-hidden="true" />}{clip.transition.type !== "cut" && <i className="relative z-[1] whitespace-nowrap text-[8px] not-italic text-[var(--orange)]">{clip.transition.type}</i>}</div>
+      <div className={`relative flex size-full items-center gap-2 overflow-hidden bg-gradient-to-br from-[#293341] to-[#1d252f] px-2.5 ${index === 0 ? "rounded-l-[5px]" : ""} ${index === entries.length - 1 ? "rounded-r-[5px]" : ""} ${selectedClipId === clip.id ? "shadow-[inset_0_0_0_2px_var(--lime)]" : ""}`}><AudioWaveform peaks={waveform} clip={trimming?.clipId === clip.id ? { ...clip, sourceInMs: trimming.sourceInMs, sourceOutMs: trimming.sourceOutMs } : clip} durationMs={state.durationMs} /><span className="relative z-[1] font-mono text-[10px] text-[#c0c6cf]">{formatTime(trimming?.clipId === clip.id ? trimming.durationMs : durationMs)}</span>{clip.muted ? <VolumeX className="relative z-[1] ml-auto size-3 shrink-0 text-[#829b96]" aria-hidden="true" /> : <Volume2 className="relative z-[1] ml-auto size-3 shrink-0 text-[#76c7b7]" aria-hidden="true" />}{clip.transition.type !== "cut" && <i className="relative z-[1] whitespace-nowrap text-[8px] not-italic text-[var(--orange)]">{clip.transition.type}</i>}</div>
       <button data-trim-handle className={`absolute top-0 right-0 z-[3] h-full w-[9px] cursor-ew-resize rounded-r border-0 bg-[var(--lime)] ${selectedClipId === clip.id ? "opacity-[.85]" : "opacity-0 group-hover:opacity-[.85]"}`} aria-label="Trim clip end" onClick={(event) => event.stopPropagation()} onPointerDown={(event) => trim(event, clip, "out")} />
     </div>)}
   </div></div>;
