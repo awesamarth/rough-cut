@@ -9,14 +9,16 @@ const DATA_DIR = process.env.DATA_DIR || "/data/jobs";
 const APP_ORIGIN = (process.env.APP_ORIGIN || "http://host.docker.internal:3000").replace(/\/$/, "");
 
 type Clip = {
-  id: string; sourceInMs: number; sourceOutMs: number; speed: number; volume: number; muted: boolean;
-  brightness: number; contrast: number; saturation: number; hue: number; fadeInMs: number; fadeOutMs: number;
+  id: string; timelineStartMs: number; sourceInMs: number; sourceOutMs: number; speed: number; volume: number; muted: boolean;
+  brightness: number; contrast: number; saturation: number; hue: number;
+  scaleX: number; scaleY: number; positionX: number; positionY: number; fadeInMs: number; fadeOutMs: number;
   transition: { type: "cut" | "crossfade" | "fade-black"; durationMs: number };
 };
 type TimedText = { text: string; startMs: number; endMs: number; position: "top" | "center" | "bottom" };
 type ProjectState = { id: string; name: string; durationMs: number; clips: Clip[]; captions: TimedText[]; overlays: TimedText[] };
 type Job = { id: string; kind: "export"; status: "queued" | "running" | "complete" | "failed"; error?: string; output?: string; createdAt: string };
 const jobs = new Map<string, Job>();
+const waveformCache = new Map<string, number[]>();
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -71,7 +73,7 @@ async function writeAss(file: string, state: ProjectState) {
 function validateState(state: ProjectState) {
   if (!state || !safeProjectId(state.id) || !Array.isArray(state.clips) || !state.clips.length || state.clips.length > 200) throw new Error("Invalid project state");
   for (const clip of state.clips) {
-    if (![clip.sourceInMs, clip.sourceOutMs, clip.speed].every(Number.isFinite) || clip.sourceInMs < 0 || clip.sourceOutMs <= clip.sourceInMs || clip.sourceOutMs > state.durationMs || clip.speed < 0.5 || clip.speed > 2) throw new Error("Invalid clip");
+    if (![clip.timelineStartMs, clip.sourceInMs, clip.sourceOutMs, clip.speed, clip.scaleX, clip.scaleY, clip.positionX, clip.positionY].every(Number.isFinite) || clip.timelineStartMs < 0 || clip.sourceInMs < 0 || clip.sourceOutMs <= clip.sourceInMs || clip.sourceOutMs > state.durationMs || clip.speed < 0.5 || clip.speed > 2 || clip.scaleX < 1 || clip.scaleX > 4 || clip.scaleY < 1 || clip.scaleY > 4 || Math.abs(clip.positionX) > 100 || Math.abs(clip.positionY) > 100) throw new Error("Invalid clip");
   }
 }
 
@@ -88,46 +90,52 @@ async function exportProject(job: Job, state: ProjectState) {
     const audio = await hasAudio(input);
     await writeAss(ass, state);
     const filters: string[] = [];
-    const durations: number[] = [];
+    const clips = [...state.clips].sort((a, b) => a.timelineStartMs - b.timelineStartMs);
+    const totalDuration = Math.max(...clips.map((clip) => clip.timelineStartMs + (clip.sourceOutMs - clip.sourceInMs) / clip.speed));
+    filters.push(`[0:v]trim=start_frame=0:end_frame=1,drawbox=color=black:t=fill,loop=loop=-1:size=1:start=0,setpts=N/30/TB,trim=duration=${seconds(totalDuration)},fps=30[basev]`);
+    if (audio) filters.push(`anullsrc=r=48000:cl=stereo:d=${seconds(totalDuration)}[basea]`);
 
-    state.clips.forEach((clip, index) => {
+    clips.forEach((clip, index) => {
       const duration = (clip.sourceOutMs - clip.sourceInMs) / clip.speed;
-      durations.push(duration);
-      const fadeIn = Math.min(clip.fadeInMs, duration / 2);
-      const fadeOut = Math.min(clip.fadeOutMs, duration / 2);
+      const prior = clips[index - 1];
+      const transitionIn = prior?.transition.type === "cut" ? 0 : prior?.transition.durationMs ?? 0;
+      const transitionOut = clip.transition.type === "cut" ? 0 : clip.transition.durationMs;
+      const fadeIn = Math.min(Math.max(clip.fadeInMs, transitionIn), duration / 2);
+      const fadeOut = Math.min(Math.max(clip.fadeOutMs, transitionOut), duration / 2);
       const videoFilters = [
         `trim=start=${seconds(clip.sourceInMs)}:end=${seconds(clip.sourceOutMs)}`,
         `setpts=(PTS-STARTPTS)/${clip.speed}`,
         "fps=30",
-        "settb=1/30",
         `eq=brightness=${clip.brightness}:contrast=${clip.contrast}:saturation=${clip.saturation}`,
         `hue=h=${clip.hue}`,
-        "format=yuv420p",
+        `scale=iw*${clip.scaleX}:ih*${clip.scaleY}`,
+        `crop=iw/${clip.scaleX}:ih/${clip.scaleY}:(iw-ow)/2*${1 - clip.positionX / 100}:(ih-oh)/2*${1 - clip.positionY / 100}`,
+        "format=yuva420p",
       ];
-      if (fadeIn > 0) videoFilters.push(`fade=t=in:st=0:d=${seconds(fadeIn)}`);
-      if (fadeOut > 0) videoFilters.push(`fade=t=out:st=${seconds(duration - fadeOut)}:d=${seconds(fadeOut)}`);
+      if (fadeIn > 0) videoFilters.push(`fade=t=in:st=0:d=${seconds(fadeIn)}:alpha=1`);
+      if (fadeOut > 0) videoFilters.push(`fade=t=out:st=${seconds(duration - fadeOut)}:d=${seconds(fadeOut)}:alpha=1`);
+      videoFilters.push(`setpts=PTS+${seconds(clip.timelineStartMs)}/TB`);
       filters.push(`[0:v]${videoFilters.join(",")}[v${index}]`);
-      if (audio) filters.push(`[0:a]atrim=start=${seconds(clip.sourceInMs)}:end=${seconds(clip.sourceOutMs)},asetpts=PTS-STARTPTS,atempo=${clip.speed},volume=${clip.muted ? 0 : clip.volume}[a${index}]`);
+      if (audio) {
+        const audioFilters = [`atrim=start=${seconds(clip.sourceInMs)}:end=${seconds(clip.sourceOutMs)}`, "asetpts=PTS-STARTPTS", `atempo=${clip.speed}`, `volume=${clip.muted ? 0 : clip.volume}`];
+        if (fadeIn > 0) audioFilters.push(`afade=t=in:st=0:d=${seconds(fadeIn)}`);
+        if (fadeOut > 0) audioFilters.push(`afade=t=out:st=${seconds(duration - fadeOut)}:d=${seconds(fadeOut)}`);
+        audioFilters.push(`adelay=${Math.round(clip.timelineStartMs)}:all=1`);
+        filters.push(`[0:a]${audioFilters.join(",")}[a${index}]`);
+      }
     });
 
-    let video = "v0";
-    let audioLabel = "a0";
-    let composedDuration = durations[0];
-    for (let index = 1; index < state.clips.length; index++) {
-      const prior = state.clips[index - 1];
-      const durationMs = prior.transition.type === "cut" ? 1 : Math.max(50, Math.min(prior.transition.durationMs, composedDuration / 2, durations[index] / 2));
-      const transitionSeconds = durationMs / 1000;
-      const offsetSeconds = Math.max(0, (composedDuration - durationMs) / 1000);
-      const transition = prior.transition.type === "fade-black" ? "fadeblack" : "fade";
+    let video = "basev";
+    clips.forEach((clip, index) => {
       const nextVideo = `vx${index}`;
-      filters.push(`[${video}][v${index}]xfade=transition=${transition}:duration=${transitionSeconds.toFixed(3)}:offset=${offsetSeconds.toFixed(3)}[${nextVideo}]`);
+      const end = clip.timelineStartMs + (clip.sourceOutMs - clip.sourceInMs) / clip.speed;
+      filters.push(`[${video}][v${index}]overlay=eof_action=pass:shortest=0:enable='between(t,${seconds(clip.timelineStartMs)},${seconds(end)})'[${nextVideo}]`);
       video = nextVideo;
-      if (audio) {
-        const nextAudio = `ax${index}`;
-        filters.push(`[${audioLabel}][a${index}]acrossfade=d=${transitionSeconds.toFixed(3)}[${nextAudio}]`);
-        audioLabel = nextAudio;
-      }
-      composedDuration += durations[index] - durationMs;
+    });
+    let audioLabel = "";
+    if (audio) {
+      audioLabel = "aout";
+      filters.push(`[basea]${clips.map((_, index) => `[a${index}]`).join("")}amix=inputs=${clips.length + 1}:duration=longest:normalize=0[${audioLabel}]`);
     }
 
     if (state.captions.length || state.overlays.length) {
@@ -137,7 +145,7 @@ async function exportProject(job: Job, state: ProjectState) {
 
     const args = ["ffmpeg", "-y", "-i", input, "-filter_complex", filters.join(";"), "-map", `[${video}]`];
     if (audio) args.push("-map", `[${audioLabel}]`, "-c:a", "aac", "-b:a", "192k");
-    args.push("-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-shortest", output);
+    args.push("-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-t", seconds(totalDuration), output);
     await run(args);
     job.status = "complete";
     job.output = output;
@@ -158,6 +166,35 @@ async function detectSilences(projectId: string, thresholdDb: number, minimumMs:
     const starts = [...stderr.matchAll(/silence_start: ([\d.]+)/g)].map((match) => Number(match[1]) * 1000);
     const ends = [...stderr.matchAll(/silence_end: ([\d.]+)/g)].map((match) => Number(match[1]) * 1000);
     return starts.map((startMs, index) => ({ startMs: Math.round(startMs), endMs: Math.round(ends[index] ?? startMs) })).filter((range) => range.endMs > range.startMs);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+async function waveform(projectId: string) {
+  const cached = waveformCache.get(projectId);
+  if (cached) return cached;
+  const dir = path.join(DATA_DIR, crypto.randomUUID());
+  const input = path.join(dir, "source");
+  await mkdir(dir, { recursive: true });
+  try {
+    await download(projectId, input);
+    if (!await hasAudio(input)) return [];
+    const process = Bun.spawn(["ffmpeg", "-v", "error", "-i", input, "-vn", "-ac", "1", "-ar", "800", "-f", "s16le", "-acodec", "pcm_s16le", "-"], { stdout: "pipe", stderr: "pipe" });
+    const [buffer, stderr, code] = await Promise.all([new Response(process.stdout).arrayBuffer(), new Response(process.stderr).text(), process.exited]);
+    if (code !== 0) throw new Error(`Waveform extraction failed: ${stderr.slice(-2000)}`);
+    const samples = new Int16Array(buffer);
+    const bucketSize = Math.max(1, Math.ceil(samples.length / 2000));
+    const peaks: number[] = [];
+    for (let start = 0; start < samples.length; start += bucketSize) {
+      let peak = 0;
+      for (let index = start; index < Math.min(samples.length, start + bucketSize); index++) peak = Math.max(peak, Math.abs(samples[index]));
+      peaks.push(peak / 32768);
+    }
+    const maximum = Math.max(0.01, ...peaks);
+    const normalized = peaks.map((peak) => Math.min(1, peak / maximum));
+    waveformCache.set(projectId, normalized);
+    return normalized;
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -192,6 +229,13 @@ Bun.serve({
         const ranges = await detectSilences(input.projectId, Math.max(-60, Math.min(-10, input.thresholdDb ?? -35)), Math.max(100, Math.min(5000, input.minimumMs ?? 500)));
         return json({ ranges });
       } catch (error) { return json({ error: error instanceof Error ? error.message : String(error) }, 500); }
+    }
+
+    if (request.method === "POST" && url.pathname === "/waveform") {
+      const input = await request.json().catch(() => null) as { projectId?: string } | null;
+      if (!safeProjectId(input?.projectId)) return json({ error: "Invalid project" }, 400);
+      try { return json({ peaks: await waveform(input.projectId) }); }
+      catch (error) { return json({ error: error instanceof Error ? error.message : String(error) }, 500); }
     }
 
     if (request.method === "POST" && url.pathname === "/transcription/prepare") {

@@ -3,6 +3,7 @@ export type TransitionType = "cut" | "crossfade" | "fade-black";
 
 export type Clip = {
   id: string;
+  timelineStartMs: number;
   sourceInMs: number;
   sourceOutMs: number;
   speed: number;
@@ -12,6 +13,10 @@ export type Clip = {
   contrast: number;
   saturation: number;
   hue: number;
+  scaleX: number;
+  scaleY: number;
+  positionX: number;
+  positionY: number;
   fadeInMs: number;
   fadeOutMs: number;
   transition: { type: TransitionType; durationMs: number };
@@ -66,7 +71,8 @@ export type EditorCommand =
   | { type: "delete_clip"; expectedVersion: number; actor: Actor; clipId: string }
   | { type: "remove_segments"; expectedVersion: number; actor: Actor; ranges: Array<{ startMs: number; endMs: number }> }
   | { type: "reorder_clips"; expectedVersion: number; actor: Actor; clipIds: string[] }
-  | { type: "adjust_clip"; expectedVersion: number; actor: Actor; clipId: string; patch: Partial<Pick<Clip, "speed" | "volume" | "muted" | "brightness" | "contrast" | "saturation" | "hue" | "fadeInMs" | "fadeOutMs">> }
+  | { type: "move_clip"; expectedVersion: number; actor: Actor; clipId: string; timelineStartMs: number }
+  | { type: "adjust_clip"; expectedVersion: number; actor: Actor; clipId: string; patch: Partial<Pick<Clip, "speed" | "volume" | "muted" | "brightness" | "contrast" | "saturation" | "hue" | "scaleX" | "scaleY" | "positionX" | "positionY" | "fadeInMs" | "fadeOutMs">> }
   | { type: "set_transition"; expectedVersion: number; actor: Actor; clipId: string; transition: Clip["transition"] }
   | { type: "protect_segment"; expectedVersion: number; actor: Actor; startMs: number; endMs: number; label: string }
   | { type: "unprotect_segment"; expectedVersion: number; actor: Actor; rangeId: string }
@@ -80,10 +86,11 @@ const id = () => crypto.randomUUID();
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 const overlaps = (a: { startMs: number; endMs: number }, b: { startMs: number; endMs: number }) => a.startMs < b.endMs && b.startMs < a.endMs;
 
-export function createClip(sourceInMs: number, sourceOutMs: number): Clip {
+export function createClip(sourceInMs: number, sourceOutMs: number, timelineStartMs = 0): Clip {
   return {
-    id: id(), sourceInMs, sourceOutMs, speed: 1, volume: 1, muted: false,
+    id: id(), timelineStartMs, sourceInMs, sourceOutMs, speed: 1, volume: 1, muted: false,
     brightness: 0, contrast: 1, saturation: 1, hue: 0,
+    scaleX: 1, scaleY: 1, positionX: 0, positionY: 0,
     fadeInMs: 0, fadeOutMs: 0, transition: { type: "cut", durationMs: 0 },
   };
 }
@@ -102,26 +109,41 @@ export function clipDuration(clip: Clip) {
 }
 
 export function timelineClips(state: ProjectState) {
-  let cursor = 0;
-  return state.clips.map((clip) => {
+  return [...state.clips].sort((a, b) => a.timelineStartMs - b.timelineStartMs).map((clip) => {
     const durationMs = clipDuration(clip);
-    const result = { clip, startMs: cursor, endMs: cursor + durationMs, durationMs };
-    cursor += durationMs - clip.transition.durationMs;
-    return result;
+    return { clip, startMs: clip.timelineStartMs, endMs: clip.timelineStartMs + durationMs, durationMs };
   });
 }
 
 export function timelineDuration(state: ProjectState) {
-  const clips = timelineClips(state);
-  return clips.length ? clips.at(-1)!.endMs : 0;
+  return Math.max(0, ...timelineClips(state).map((entry) => entry.endMs));
 }
 
 export function timelineToSource(state: ProjectState, timelineMs: number) {
-  const entry = timelineClips(state).find(({ startMs, endMs }) => timelineMs >= startMs && timelineMs <= endMs) ?? timelineClips(state).at(-1);
+  const entry = timelineClips(state).find(({ startMs, endMs }) => timelineMs >= startMs && timelineMs < endMs);
   if (!entry) return null;
   return {
     clipId: entry.clip.id,
     sourceMs: clamp(entry.clip.sourceInMs + (timelineMs - entry.startMs) * entry.clip.speed, entry.clip.sourceInMs, entry.clip.sourceOutMs),
+  };
+}
+
+export function migrateProjectState(state: ProjectState): ProjectState {
+  let cursor = 0;
+  return {
+    ...state,
+    clips: state.clips.map((clip) => {
+      const migrated = {
+        ...clip,
+        timelineStartMs: Number.isFinite(clip.timelineStartMs) ? clip.timelineStartMs : cursor,
+        scaleX: Number.isFinite(clip.scaleX) ? clip.scaleX : 1,
+        scaleY: Number.isFinite(clip.scaleY) ? clip.scaleY : 1,
+        positionX: Number.isFinite(clip.positionX) ? clip.positionX : 0,
+        positionY: Number.isFinite(clip.positionY) ? clip.positionY : 0,
+      };
+      cursor = migrated.timelineStartMs + clipDuration(migrated) - migrated.transition.durationMs;
+      return migrated;
+    }),
   };
 }
 
@@ -144,6 +166,8 @@ function normalizeClip(clip: Clip, durationMs: number): Clip {
     speed: clamp(clip.speed, 0.5, 2), volume: clamp(clip.volume, 0, 2),
     brightness: clamp(clip.brightness, -1, 1), contrast: clamp(clip.contrast, 0, 2),
     saturation: clamp(clip.saturation, 0, 3), hue: clamp(clip.hue, -180, 180),
+    scaleX: clamp(clip.scaleX, 1, 4), scaleY: clamp(clip.scaleY, 1, 4),
+    positionX: clamp(clip.positionX, -100, 100), positionY: clamp(clip.positionY, -100, 100),
     fadeInMs: clamp(clip.fadeInMs, 0, adjustedDuration / 2),
     fadeOutMs: clamp(clip.fadeOutMs, 0, adjustedDuration / 2),
   };
@@ -154,8 +178,24 @@ function normalizeTransitions(clips: Clip[]) {
     const following = clips[index + 1];
     if (!following || clip.transition.type === "cut") return { ...clip, transition: { type: "cut" as const, durationMs: 0 } };
     const maximum = Math.min(clipDuration(clip), clipDuration(following)) / 2;
-    return { ...clip, transition: { ...clip.transition, durationMs: clamp(clip.transition.durationMs, 50, maximum) } };
+    const durationMs = clamp(clip.transition.durationMs, 50, maximum);
+    const expectedStart = clip.timelineStartMs + clipDuration(clip) - durationMs;
+    return Math.abs(following.timelineStartMs - expectedStart) <= 1
+      ? { ...clip, transition: { ...clip.transition, durationMs } }
+      : { ...clip, transition: { type: "cut" as const, durationMs: 0 } };
   });
+}
+
+function assertTimelineLayout(clips: Clip[]) {
+  const sorted = [...clips].sort((a, b) => a.timelineStartMs - b.timelineStartMs);
+  sorted.forEach((clip) => {
+    if (!Number.isFinite(clip.timelineStartMs) || clip.timelineStartMs < 0) throw new Error("Invalid timeline position");
+  });
+  for (let index = 1; index < sorted.length; index++) {
+    const prior = sorted[index - 1];
+    const allowedOverlap = prior.transition.type === "cut" ? 0 : prior.transition.durationMs;
+    if (sorted[index].timelineStartMs < prior.timelineStartMs + clipDuration(prior) - allowedOverlap - 1) throw new Error("Clips cannot overlap");
+  }
 }
 
 function subtractRanges(clip: Clip, ranges: Array<{ startMs: number; endMs: number }>) {
@@ -172,6 +212,7 @@ function subtractRanges(clip: Clip, ranges: Array<{ startMs: number; endMs: numb
   return pieces.map((piece, index) => ({
     ...clip,
     id: index === 0 ? clip.id : id(),
+    timelineStartMs: clip.timelineStartMs + (piece.startMs - clip.sourceInMs) / clip.speed,
     sourceInMs: piece.startMs,
     sourceOutMs: piece.endMs,
     transition: index === pieces.length - 1 ? clip.transition : { type: "cut" as const, durationMs: 0 },
@@ -186,6 +227,7 @@ export function validateState(value: unknown): asserts value is ProjectState {
     normalizeClip(clip, state.durationMs);
     if (!["cut", "crossfade", "fade-black"].includes(clip.transition.type) || !Number.isFinite(clip.transition.durationMs) || clip.transition.durationMs < 0) throw new Error("Invalid transition");
   });
+  assertTimelineLayout(state.clips);
   for (const collection of [state.protectedRanges, state.broll]) {
     if (!Array.isArray(collection)) throw new Error("Invalid source ranges");
     collection.forEach((range) => validateRange(range.startMs, range.endMs, state.durationMs));
@@ -211,7 +253,7 @@ export function applyCommand(state: ProjectState, command: EditorCommand): Proje
       validateRange(clip.sourceInMs, command.sourceMs, state.durationMs);
       validateRange(command.sourceMs, clip.sourceOutMs, state.durationMs);
       const left = { ...clip, sourceOutMs: command.sourceMs, fadeOutMs: 0, transition: { type: "cut" as const, durationMs: 0 } };
-      const right = { ...clip, id: id(), sourceInMs: command.sourceMs, fadeInMs: 0 };
+      const right = { ...clip, id: id(), timelineStartMs: clip.timelineStartMs + (command.sourceMs - clip.sourceInMs) / clip.speed, sourceInMs: command.sourceMs, fadeInMs: 0 };
       next.clips.splice(clipIndex, 1, left, right);
       break;
     }
@@ -220,7 +262,7 @@ export function applyCommand(state: ProjectState, command: EditorCommand): Proje
       validateRange(command.sourceInMs, command.sourceOutMs, state.durationMs);
       if (command.sourceInMs > clip.sourceInMs) assertNotProtected(state, { startMs: clip.sourceInMs, endMs: command.sourceInMs });
       if (command.sourceOutMs < clip.sourceOutMs) assertNotProtected(state, { startMs: command.sourceOutMs, endMs: clip.sourceOutMs });
-      next.clips[clipIndex] = normalizeClip({ ...clip, sourceInMs: command.sourceInMs, sourceOutMs: command.sourceOutMs }, state.durationMs);
+      next.clips[clipIndex] = normalizeClip({ ...clip, timelineStartMs: clip.timelineStartMs + (command.sourceInMs - clip.sourceInMs) / clip.speed, sourceInMs: command.sourceInMs, sourceOutMs: command.sourceOutMs }, state.durationMs);
       break;
     }
     case "delete_clip": {
@@ -239,9 +281,18 @@ export function applyCommand(state: ProjectState, command: EditorCommand): Proje
     }
     case "reorder_clips": {
       if (new Set(command.clipIds).size !== next.clips.length || command.clipIds.some((clipId) => !next.clips.some((clip) => clip.id === clipId))) throw new Error("Clip order must include every clip exactly once");
-      next.clips = command.clipIds.map((clipId) => next.clips.find((clip) => clip.id === clipId)!);
+      let cursor = 0;
+      next.clips = command.clipIds.map((clipId) => {
+        const clip = next.clips.find((item) => item.id === clipId)!;
+        const positioned = { ...clip, timelineStartMs: cursor };
+        cursor += clipDuration(positioned) - positioned.transition.durationMs;
+        return positioned;
+      });
       break;
     }
+    case "move_clip":
+      next.clips[clipIndex] = { ...next.clips[clipIndex], timelineStartMs: command.timelineStartMs };
+      break;
     case "adjust_clip":
       next.clips[clipIndex] = normalizeClip({ ...next.clips[clipIndex], ...command.patch }, state.durationMs);
       break;
@@ -250,7 +301,14 @@ export function applyCommand(state: ProjectState, command: EditorCommand): Proje
       const following = next.clips[clipIndex + 1];
       if (!following && command.transition.type !== "cut") throw new Error("The last clip cannot transition to another clip");
       const max = following ? Math.min(clipDuration(clip), clipDuration(following)) / 2 : 0;
-      next.clips[clipIndex] = { ...clip, transition: { type: command.transition.type, durationMs: command.transition.type === "cut" ? 0 : clamp(command.transition.durationMs, 50, max) } };
+      const durationMs = command.transition.type === "cut" ? 0 : clamp(command.transition.durationMs, 50, max);
+      if (following && command.transition.type !== "cut") {
+        const clipEnd = clip.timelineStartMs + clipDuration(clip);
+        const currentExpectedStart = clipEnd - (clip.transition.type === "cut" ? 0 : clip.transition.durationMs);
+        if (Math.abs(following.timelineStartMs - currentExpectedStart) > 1) throw new Error("Transitions require touching clips");
+        next.clips[clipIndex + 1] = { ...following, timelineStartMs: clipEnd - durationMs };
+      }
+      next.clips[clipIndex] = { ...clip, transition: { type: command.transition.type, durationMs } };
       break;
     }
     case "protect_segment":
@@ -287,7 +345,10 @@ export function applyCommand(state: ProjectState, command: EditorCommand): Proje
   }
 
   if (!next.clips.length) throw new Error("Timeline must contain at least one clip");
+  next.clips.sort((a, b) => a.timelineStartMs - b.timelineStartMs);
+  assertTimelineLayout(next.clips);
   next.clips = normalizeTransitions(next.clips);
+  assertTimelineLayout(next.clips);
   next.version = state.version + 1;
   next.activity = [{ id: id(), at: new Date().toISOString(), actor: command.actor, summary }, ...state.activity].slice(0, 100);
   return next;

@@ -14,11 +14,11 @@ function timecode(ms: number) {
 }
 
 export function exportEdl(state: ProjectState) {
-  let recordMs = 0;
   const lines = [`TITLE: ${state.name}`, "FCM: NON-DROP FRAME", ""];
 
-  state.clips.forEach((clip, index) => {
+  [...state.clips].sort((a, b) => a.timelineStartMs - b.timelineStartMs).forEach((clip, index) => {
     const duration = clipDuration(clip);
+    const recordMs = clip.timelineStartMs;
     const transitionFrames = Math.round((clip.transition.durationMs / 1000) * FPS);
     const transition = clip.transition.type === "cut" ? "C" : `D ${String(transitionFrames).padStart(3, "0")}`;
     const recordOut = recordMs + duration;
@@ -28,7 +28,6 @@ export function exportEdl(state: ProjectState) {
       `* ROUGH_CUT CLIP ID: ${clip.id}`,
       "",
     );
-    recordMs = recordOut - clip.transition.durationMs;
   });
 
   return lines.join("\n");

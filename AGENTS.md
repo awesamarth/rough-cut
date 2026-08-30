@@ -27,6 +27,7 @@ WebMCP tools ───┘
 - Use direct `document.modelContext.registerTool`; support every compliant external agent.
 - Source media is immutable; all editing is non-destructive.
 - MP4 and EDL exports stay in scope.
+- Use Tailwind utility classes in JSX for component and layout styling. Touch `globals.css` only for root tokens, base resets, keyframes, or selectors that Tailwind cannot express cleanly; do not add component-specific CSS there.
 
 ## Human editor
 
@@ -131,4 +132,4 @@ No speaker diarization. “Render” means FFmpeg video generation, not Render.c
 
 ## Current status
 
-The editor, versioned command layer, direct WebMCP tools, D1/R2 persistence, Workers AI transcription, local FFmpeg pipeline, authenticated media proxy, exports, tests, public Worker, and public repository are implemented. The Cloudflare Container image is deployment-ready but the account must be upgraded to Workers Paid before Cloudflare will accept it. Submission assets still needed: a concise write-up and sub-three-minute YouTube demo.
+The editor, versioned command layer, direct WebMCP tools, D1/R2 persistence, Workers AI transcription, local FFmpeg pipeline, authenticated media proxy, exports, tests, public Worker, and public repository are implemented. Local UI review is active: sliders preview live, the playhead/ruler supports click-drag scrubbing, the unified clip lane includes real FFmpeg-derived audio waveforms, preview/timeline/lower panes are vertically resizable, the timeline supports Option/Alt-wheel zoom plus drag-edge auto-scroll, keyboard transport/undo shortcuts work, clips support independent X/Y zoom and pan with matching exports, and the timeline supports explicit gaps, non-ripple edge trims, linked movement, and toggleable edge/playhead snapping. The Cloudflare Container image is deployment-ready but the account must be upgraded to Workers Paid before Cloudflare will accept it. Submission assets still needed: a concise write-up and sub-three-minute YouTube demo.

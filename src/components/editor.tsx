@@ -1,8 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { RotateCcw } from "lucide-react";
-import { forwardRef, useCallback, useEffect, useRef, useState } from "react";
+import { Magnet, RotateCcw, Volume2, VolumeX } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { clipDuration, timelineClips, timelineDuration, timelineToSource, type Clip, type ProjectState, type SourceRange, type TimedText, type TranscriptWord } from "@/lib/editor";
 import { exportEdl } from "@/lib/edl";
 import { type CommandInput, useEditor } from "./use-editor";
@@ -14,6 +14,7 @@ const formatTime = (ms: number) => {
   return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(Math.floor(seconds % 60)).padStart(2, "0")}.${String(Math.floor((seconds % 1) * 10))}`;
 };
 const cssFilter = (clip?: Clip) => clip ? `brightness(${1 + clip.brightness}) contrast(${clip.contrast}) saturate(${clip.saturation}) hue-rotate(${clip.hue}deg)` : undefined;
+const cssTransform = (clip?: Clip) => clip ? `translate(${clip.positionX * (clip.scaleX - 1) / 2}%, ${clip.positionY * (clip.scaleY - 1) / 2}%) scale(${clip.scaleX}, ${clip.scaleY})` : undefined;
 
 function downloadText(name: string, text: string, type = "text/plain") {
   const url = URL.createObjectURL(new Blob([text], { type }));
@@ -24,13 +25,14 @@ function downloadText(name: string, text: string, type = "text/plain") {
 
 export function Editor({ projectId }: { projectId: string }) {
   const editor = useEditor(projectId);
-  const { project, state, transcript, dispatch, previewClip, initialize, undo, redo, saveTranscript, saving, error, setError } = editor;
+  const { project, state, transcript, dispatch, previewClip, initialize, undo, redo, saveTranscript, saving, lastSavedAt, error, setError } = editor;
   const videoRef = useRef<HTMLVideoElement>(null);
   const nextVideoRef = useRef<HTMLVideoElement>(null);
-  const timelineRef = useRef<HTMLDivElement>(null);
   const transitionStarted = useRef(false);
+  const initialSeekDone = useRef(false);
+  const gapFrame = useRef<number | null>(null);
   const [selectedClipId, setSelectedClipId] = useState("");
-  const [activeIndex, setActiveIndex] = useState(0);
+  const [activeIndex, setActiveIndex] = useState(-1);
   const [playheadMs, setPlayheadMs] = useState(0);
   const [secondaryOpacity, setSecondaryOpacity] = useState(0);
   const [blackOpacity, setBlackOpacity] = useState(0);
@@ -39,7 +41,53 @@ export function Editor({ projectId }: { projectId: string }) {
   const [webmcpStatus, setWebmcpStatus] = useState("Unavailable");
   const [exportStatus, setExportStatus] = useState("");
   const [frame, setFrame] = useState<string | null>(null);
+  const [waveform, setWaveform] = useState<number[]>([]);
+  const [timelineHeight, setTimelineHeight] = useState(180);
+  const [snapEnabled, setSnapEnabled] = useState(true);
+  const [optionHeld, setOptionHeld] = useState(false);
+  const [lowerHeight, setLowerHeight] = useState(210);
 
+  const startResize = (kind: "preview" | "timeline", event: React.PointerEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    const startY = event.clientY;
+    const startTimeline = timelineHeight;
+    document.body.style.cursor = "row-resize";
+    document.body.style.userSelect = "none";
+    const startLower = lowerHeight;
+    const move = (pointer: PointerEvent) => {
+      if (kind === "preview") {
+        const maximum = Math.max(180, window.innerHeight - startLower - 58 - (error ? 34 : 0) - 160);
+        setTimelineHeight(Math.max(180, Math.min(maximum, startTimeline + startY - pointer.clientY)));
+      } else {
+        const total = startTimeline + startLower;
+        const nextTimeline = Math.max(180, Math.min(total - 120, startTimeline + pointer.clientY - startY));
+        setTimelineHeight(nextTimeline);
+        setLowerHeight(total - nextTimeline);
+      }
+    };
+    const finish = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", finish); document.body.style.cursor = ""; document.body.style.userSelect = ""; };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", finish, { once: true });
+  };
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch(`${MEDIA_URL}/waveform`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ projectId }), signal: controller.signal })
+      .then(async (response) => { const result = await response.json() as { peaks?: number[] }; if (response.ok && result.peaks) setWaveform(result.peaks); })
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, [projectId]);
+
+  useEffect(() => {
+    const key = (event: KeyboardEvent) => { if (event.key === "Alt") setOptionHeld(event.type === "keydown"); };
+    const release = () => setOptionHeld(false);
+    window.addEventListener("keydown", key);
+    window.addEventListener("keyup", key);
+    window.addEventListener("blur", release);
+    return () => { window.removeEventListener("keydown", key); window.removeEventListener("keyup", key); window.removeEventListener("blur", release); };
+  }, []);
+
+  const effectiveSnapEnabled = optionHeld ? !snapEnabled : snapEnabled;
   const totalMs = state ? timelineDuration(state) : 0;
   const selectedClip = state?.clips.find((clip) => clip.id === selectedClipId) ?? state?.clips[0];
   const activeClip = state?.clips[activeIndex];
@@ -57,21 +105,64 @@ export function Editor({ projectId }: { projectId: string }) {
     video.volume = activeClip.muted ? 0 : Math.min(1, activeClip.volume);
   }, [activeClip]);
 
+  const stopGapPlayback = useCallback(() => {
+    if (gapFrame.current !== null) cancelAnimationFrame(gapFrame.current);
+    gapFrame.current = null;
+  }, []);
+
   const seekTimeline = useCallback((targetMs: number) => {
     if (!state || !videoRef.current) return;
+    stopGapPlayback();
     const clamped = Math.max(0, Math.min(totalMs, targetMs));
     const all = timelineClips(state);
-    let index = all.findIndex((entry, entryIndex) => clamped >= entry.startMs && (clamped < entry.endMs || entryIndex === all.length - 1));
-    if (index < 0) index = all.length - 1;
+    const index = all.findIndex((entry) => clamped >= entry.startMs && clamped < entry.endMs);
+    setPlayheadMs(clamped);
+    if (index < 0) {
+      setActiveIndex(-1);
+      videoRef.current.pause();
+      setSecondaryOpacity(0); setBlackOpacity(1);
+      return;
+    }
     const entry = all[index];
     const sourceMs = entry.clip.sourceInMs + (clamped - entry.startMs) * entry.clip.speed;
     setActiveIndex(index);
-    setPlayheadMs(clamped);
     videoRef.current.currentTime = Math.min(entry.clip.sourceOutMs - 1, sourceMs) / 1000;
     videoRef.current.playbackRate = entry.clip.speed;
     transitionStarted.current = false;
     setSecondaryOpacity(0); setBlackOpacity(0);
-  }, [state, totalMs]);
+  }, [state, stopGapPlayback, totalMs]);
+
+  const ensureInitialSeek = useCallback(() => {
+    if (initialSeekDone.current || !state || !videoRef.current || videoRef.current.readyState < 1) return;
+    initialSeekDone.current = true;
+    seekTimeline(0);
+  }, [seekTimeline, state]);
+  useEffect(() => ensureInitialSeek(), [ensureInitialSeek]);
+
+  const startGapPlayback = useCallback((startMs: number) => {
+    if (!state || !videoRef.current) return;
+    stopGapPlayback();
+    const clips = timelineClips(state);
+    const nextIndex = clips.findIndex((entry) => entry.startMs >= startMs);
+    const endMs = nextIndex < 0 ? totalMs : clips[nextIndex].startMs;
+    const startedAt = performance.now();
+    setIsPlaying(true);
+    setBlackOpacity(1);
+    const tick = (now: number) => {
+      const current = Math.min(endMs, startMs + now - startedAt);
+      setPlayheadMs(current);
+      if (current < endMs) { gapFrame.current = requestAnimationFrame(tick); return; }
+      gapFrame.current = null;
+      if (nextIndex < 0) { setIsPlaying(false); return; }
+      const entry = clips[nextIndex];
+      setActiveIndex(nextIndex);
+      setBlackOpacity(0);
+      videoRef.current!.currentTime = entry.clip.sourceInMs / 1000;
+      videoRef.current!.playbackRate = entry.clip.speed;
+      void videoRef.current!.play();
+    };
+    gapFrame.current = requestAnimationFrame(tick);
+  }, [state, stopGapPlayback, totalMs]);
 
   const updatePlayback = useCallback(() => {
     const video = videoRef.current;
@@ -79,7 +170,7 @@ export function Editor({ projectId }: { projectId: string }) {
     const entry = timelineClips(state)[activeIndex];
     const sourceMs = video.currentTime * 1000;
     const currentTimelineMs = entry.startMs + (sourceMs - activeClip.sourceInMs) / activeClip.speed;
-    setPlayheadMs(Math.min(currentTimelineMs, totalMs));
+    setPlayheadMs(Math.max(0, Math.min(currentTimelineMs, totalMs)));
 
     const remainingMs = (activeClip.sourceOutMs - sourceMs) / activeClip.speed;
     const transitionMs = activeClip.transition.durationMs;
@@ -112,6 +203,8 @@ export function Editor({ projectId }: { projectId: string }) {
 
     if (sourceMs >= activeClip.sourceOutMs - 15) {
       if (!nextClip) { video.pause(); setPlayheadMs(totalMs); return; }
+      const nextEntry = timelineClips(state)[activeIndex + 1];
+      if (nextEntry.startMs > entry.endMs + 1) { video.pause(); startGapPlayback(entry.endMs); return; }
       const overlapMs = activeClip.transition.type === "cut" ? 0 : activeClip.transition.durationMs;
       setActiveIndex(activeIndex + 1);
       video.currentTime = (nextClip.sourceInMs + overlapMs * nextClip.speed) / 1000;
@@ -122,18 +215,44 @@ export function Editor({ projectId }: { projectId: string }) {
       setSecondaryOpacity(0); setBlackOpacity(0);
       if (!video.paused) void video.play();
     }
-  }, [activeClip, activeIndex, nextClip, state, totalMs]);
+  }, [activeClip, activeIndex, nextClip, startGapPlayback, state, totalMs]);
 
-  const togglePlayback = () => {
+  const togglePlayback = useCallback(() => {
     const video = videoRef.current;
     if (!video) return;
+    if (gapFrame.current !== null || activeIndex < 0 && isPlaying) { stopGapPlayback(); setIsPlaying(false); return; }
+    if (activeIndex < 0) { startGapPlayback(playheadMs); return; }
     if (video.paused) {
-      if (playheadMs >= totalMs - 10) seekTimeline(0);
+      if (playheadMs >= totalMs - 10) { seekTimeline(0); void video.play(); return; }
       void video.play();
     } else {
       video.pause(); nextVideoRef.current?.pause();
     }
-  };
+  }, [activeIndex, isPlaying, playheadMs, seekTimeline, startGapPlayback, stopGapPlayback, totalMs]);
+
+  useEffect(() => {
+    const shortcuts = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest("input, textarea, select, [contenteditable='true']")) return;
+      if (event.code === "Space" && !event.metaKey && !event.ctrlKey && !event.altKey) {
+        event.preventDefault();
+        (document.activeElement as HTMLElement | null)?.blur();
+        if (!event.repeat) togglePlayback();
+        return;
+      }
+      const modifier = event.metaKey || event.ctrlKey;
+      if (!modifier) return;
+      if (event.key.toLowerCase() === "z") {
+        event.preventDefault();
+        if (!event.repeat) event.shiftKey ? redo() : undo();
+      } else if (event.key.toLowerCase() === "y") {
+        event.preventDefault();
+        if (!event.repeat) redo();
+      }
+    };
+    window.addEventListener("keydown", shortcuts);
+    return () => window.removeEventListener("keydown", shortcuts);
+  }, [redo, togglePlayback, undo]);
 
   const splitAtPlayhead = () => {
     if (!state) return;
@@ -203,10 +322,10 @@ export function Editor({ projectId }: { projectId: string }) {
   if (!project) return <main className="loading-screen"><div className="spinner" /><p>{error || "Loading project…"}</p></main>;
 
   return (
-    <main className="editor-shell">
-      <header className="editor-header">
+    <main className="grid h-dvh min-h-0 grid-rows-[58px_auto_minmax(0,1fr)_var(--timeline-height)_var(--lower-height)] overflow-hidden bg-[var(--bg)] max-[900px]:h-auto max-[900px]:min-h-dvh max-[900px]:grid-rows-[auto_auto_auto_180px_290px] max-[900px]:overflow-visible" style={{ "--timeline-height": `${timelineHeight}px`, "--lower-height": `${lowerHeight}px` } as React.CSSProperties}>
+      <header className="editor-header row-start-1">
         <Link href="/" className="brand small"><span>ROUGH</span><i>{"//"}</i><span>CUT</span></Link>
-        <div className="project-title"><strong>{state?.name ?? project.name}</strong><span>{saving ? "Saving…" : state ? `v${state.version} · Saved` : "Preparing timeline"}</span></div>
+        <div className="project-title"><strong>{state?.name ?? project.name}</strong><SaveStatus saving={saving} savedAt={lastSavedAt} ready={!!state} /></div>
         <div className="header-actions">
           <span className={`webmcp-badge ${webmcpStatus === "Ready" ? "ready" : ""}`}><b /> WebMCP {webmcpStatus}</span>
           <button className="ghost-button" onClick={() => state && downloadText(`${state.name}.edl`, exportEdl(state))}>EDL</button>
@@ -214,20 +333,20 @@ export function Editor({ projectId }: { projectId: string }) {
         </div>
       </header>
 
-      {error && <div className="error-banner" role="alert">{error}<button onClick={() => setError("")}>×</button></div>}
+      {error && <div className="error-banner row-start-2" role="alert">{error}<button onClick={() => setError("")}>×</button></div>}
 
-      <section className="editor-main">
-        <div className="workspace">
-          <div className="preview-stage">
+      <section className="row-start-3 grid min-h-0 grid-cols-[minmax(0,1fr)_280px] max-[900px]:grid-cols-1">
+        <div className="flex min-h-0 min-w-0 flex-col items-center justify-center overflow-hidden bg-[radial-gradient(circle,_#1b1e24_0,_#0e1013_70%)] p-3 max-[900px]:overflow-visible max-[900px]:p-2.5">
+          <div className="preview-stage relative aspect-video h-[min(calc(100%_-_42px),506px)] w-auto max-w-full flex-none overflow-hidden rounded-[5px] bg-black shadow-[0_20px_60px_#0009] max-[900px]:h-auto max-[900px]:w-full">
             <video
               ref={videoRef} src={`/api/projects/${projectId}/media`} playsInline preload="metadata"
-              style={{ filter: cssFilter(activeClip) }}
-              onLoadedMetadata={(event) => initialize(event.currentTarget.duration * 1000)}
+              style={{ filter: cssFilter(activeClip), transform: cssTransform(activeClip) }}
+              onLoadedMetadata={(event) => { initialize(event.currentTarget.duration * 1000); requestAnimationFrame(ensureInitialSeek); }}
               onTimeUpdate={updatePlayback}
               onPlay={() => { setIsPlaying(true); if (transitionStarted.current) void nextVideoRef.current?.play(); }}
-              onPause={() => { setIsPlaying(false); nextVideoRef.current?.pause(); }}
+              onPause={() => { if (gapFrame.current === null) setIsPlaying(false); nextVideoRef.current?.pause(); }}
             />
-            <video ref={nextVideoRef} src={`/api/projects/${projectId}/media`} playsInline preload="metadata" muted={false} className="transition-video" style={{ opacity: secondaryOpacity, filter: cssFilter(nextClip) }} />
+            <video ref={nextVideoRef} src={`/api/projects/${projectId}/media`} playsInline preload="metadata" muted={false} className="transition-video" style={{ opacity: secondaryOpacity, filter: cssFilter(nextClip), transform: cssTransform(nextClip) }} />
             <div className="black-transition" style={{ opacity: blackOpacity }} />
             {state?.overlays.filter((item) => playheadMs >= item.startMs && playheadMs <= item.endMs).map((item) => <div key={item.id} className={`preview-text ${item.position}`}>{item.text}</div>)}
             {state?.captions.filter((item) => playheadMs >= item.startMs && playheadMs <= item.endMs).map((item) => <div key={item.id} className="preview-caption">{item.text}</div>)}
@@ -248,12 +367,14 @@ export function Editor({ projectId }: { projectId: string }) {
         </aside>
       </section>
 
-      <section className="timeline-section">
+      <section className="relative row-start-4 grid min-h-0 min-w-0 grid-rows-[39px_minmax(0,1fr)] overflow-hidden border-y border-[var(--line)] bg-[#0e1014]">
+        <button type="button" aria-label="Resize preview and timeline" title="Drag to resize preview and timeline" className="group absolute top-0 left-0 z-20 hidden h-2 w-full touch-none cursor-row-resize border-0 bg-transparent p-0 min-[901px]:block" onPointerDown={(event) => startResize("preview", event)}><span className="absolute top-0 left-1/2 h-px w-12 -translate-x-1/2 bg-[#3a4049] transition-colors group-hover:bg-[var(--lime)]" /></button>
         <div className="timeline-toolbar">
           <div>
-            <button onClick={togglePlayback}>▶</button>
+            <button aria-label={isPlaying ? "Pause" : "Play"} title={isPlaying ? "Pause" : "Play"} className="inline-flex w-8 justify-center" onClick={togglePlayback}>{isPlaying ? "Ⅱ" : "▶"}</button>
             <button onClick={splitAtPlayhead}>⌁ Split</button>
             <button disabled={!selectedClip} onClick={() => selectedClip && dispatch({ type: "delete_clip", actor: "human", clipId: selectedClip.id })}>⌫ Delete</button>
+            <button aria-pressed={effectiveSnapEnabled} title="Toggle timeline snapping (hold Option/Alt to temporarily invert)" className={`inline-flex items-center gap-1.5 ${effectiveSnapEnabled ? "!border-[var(--lime)] !text-[var(--lime)]" : ""}`} onClick={() => setSnapEnabled((enabled) => !enabled)}><Magnet className="size-3" aria-hidden="true" /> Snap</button>
           </div>
           <div>
             <button onClick={() => undo()}>↶ Undo</button>
@@ -261,10 +382,11 @@ export function Editor({ projectId }: { projectId: string }) {
             <span>{state?.clips.length ?? 0} clips · {formatTime(totalMs)}</span>
           </div>
         </div>
-        {state && <Timeline ref={timelineRef} state={state} playheadMs={playheadMs} selectedClipId={selectedClip?.id ?? ""} onSelect={setSelectedClipId} onSeek={seekTimeline} dispatch={dispatch} setError={setError} />}
+        {state && <Timeline state={state} waveform={waveform} snapEnabled={snapEnabled} isPlaying={isPlaying} playheadMs={playheadMs} selectedClipId={selectedClip?.id ?? ""} onSelect={setSelectedClipId} onSeek={seekTimeline} dispatch={dispatch} setError={setError} />}
       </section>
 
-      <section className="lower-panel">
+      <section className="relative row-start-5 grid min-h-0 grid-rows-[36px_1fr] overflow-hidden bg-[var(--panel)]">
+        <button type="button" aria-label="Resize timeline and transcript" title="Drag to resize timeline and transcript" className="group absolute top-0 left-0 z-20 hidden h-2 w-full touch-none cursor-row-resize border-0 bg-transparent p-0 min-[901px]:block" onPointerDown={(event) => startResize("timeline", event)}><span className="absolute top-0 left-1/2 h-px w-12 -translate-x-1/2 bg-[#3a4049] transition-colors group-hover:bg-[var(--lime)]" /></button>
         <div className="lower-tabs">
           {(["transcript", "text", "silence", "activity"] as const).map((name) => <button key={name} className={tab === name ? "active" : ""} onClick={() => setTab(name)}>{name}</button>)}
         </div>
@@ -281,11 +403,21 @@ export function Editor({ projectId }: { projectId: string }) {
   );
 }
 
+function SaveStatus({ saving, savedAt, ready }: { saving: boolean; savedAt: number | null; ready: boolean }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => { const timer = window.setInterval(() => setNow(Date.now()), 10_000); return () => window.clearInterval(timer); }, []);
+  if (saving) return <span>Saving…</span>;
+  if (!ready || !savedAt) return <span>Preparing timeline</span>;
+  const seconds = Math.max(0, Math.floor((now - savedAt) / 1000));
+  const elapsed = seconds < 5 ? "just now" : seconds < 60 ? `${seconds}s ago` : seconds < 3600 ? `${Math.floor(seconds / 60)}m ago` : `${Math.floor(seconds / 3600)}h ago`;
+  return <span>Saved · {elapsed}</span>;
+}
+
 function RangeControl({ label, value, resetValue, min, max, step, suffix = "", onPreview, onCommit }: { label: string; value: number; resetValue: number; min: number; max: number; step: number; suffix?: string; onPreview?(value: number): void; onCommit(value: number): void }) {
   const [draft, setDraft] = useState(value);
   useEffect(() => setDraft(value), [value]);
   const reset = () => { const next = Math.max(min, Math.min(max, resetValue)); setDraft(next); onPreview?.(next); onCommit(next); };
-  return <label className="range-control"><span className="range-label">{label}<span className="range-value"><output>{draft}{suffix}</output><button type="button" className="range-reset" title={`Reset ${label}`} aria-label={`Reset ${label}`} onClick={(event) => { event.preventDefault(); reset(); }}><RotateCcw size={13} strokeWidth={2} aria-hidden="true" /></button></span></span><input type="range" min={min} max={max} step={step} value={draft} onChange={(event) => { const next = Number(event.target.value); setDraft(next); onPreview?.(next); }} onPointerUp={() => onCommit(draft)} onKeyUp={() => onCommit(draft)} /></label>;
+  return <label className="my-2.5 block"><span className="flex items-center justify-between text-[10px] leading-none text-[#a6abb4]">{label}<span className="flex h-4 items-center gap-1"><output className="inline-flex h-4 items-center font-mono leading-none text-[#f3f3f4]">{draft}{suffix}</output><button type="button" className="inline-flex size-4 cursor-pointer items-center justify-center border-0 bg-transparent p-0 text-[#858b96] hover:text-(--lime) focus-visible:text-(--lime)" title={`Reset ${label}`} aria-label={`Reset ${label}`} onClick={(event) => { event.preventDefault(); reset(); }}><RotateCcw className="size-2.5 -translate-y-[0.5px] shrink-0" strokeWidth={2} aria-hidden="true" /></button></span></span><input className="h-0.75 w-full accent-(--lime)" type="range" min={min} max={max} step={step} value={draft} onChange={(event) => { const next = Number(event.target.value); setDraft(next); onPreview?.(next); }} onPointerUp={() => onCommit(draft)} onKeyUp={() => onCommit(draft)} /></label>;
 }
 
 function ClipInspector({ state, clip, dispatch, previewClip, setError }: { state: ProjectState; clip: Clip; dispatch(command: CommandInput): ProjectState; previewClip(clipId: string, patch: Partial<Clip>): void; setError(message: string): void }) {
@@ -302,6 +434,13 @@ function ClipInspector({ state, clip, dispatch, previewClip, setError }: { state
     <RangeControl label="Contrast" value={clip.contrast} resetValue={1} min={0} max={2} step={0.05} onPreview={(contrast) => preview({ contrast })} onCommit={(contrast) => adjust({ contrast })} />
     <RangeControl label="Saturation" value={clip.saturation} resetValue={1} min={0} max={3} step={0.05} onPreview={(saturation) => preview({ saturation })} onCommit={(saturation) => adjust({ saturation })} />
     <RangeControl label="Hue" value={clip.hue} resetValue={0} min={-180} max={180} step={1} suffix="°" onPreview={(hue) => preview({ hue })} onCommit={(hue) => adjust({ hue })} />
+    <h3>Transform</h3>
+    <div className="grid grid-cols-2 gap-x-3">
+      <RangeControl label="Zoom X" value={clip.scaleX} resetValue={1} min={1} max={4} step={0.05} suffix="×" onPreview={(scaleX) => preview({ scaleX })} onCommit={(scaleX) => adjust({ scaleX })} />
+      <RangeControl label="Zoom Y" value={clip.scaleY} resetValue={1} min={1} max={4} step={0.05} suffix="×" onPreview={(scaleY) => preview({ scaleY })} onCommit={(scaleY) => adjust({ scaleY })} />
+      <RangeControl label="Pan X" value={clip.positionX} resetValue={0} min={-100} max={100} step={1} suffix="%" onPreview={(positionX) => preview({ positionX })} onCommit={(positionX) => adjust({ positionX })} />
+      <RangeControl label="Pan Y" value={clip.positionY} resetValue={0} min={-100} max={100} step={1} suffix="%" onPreview={(positionY) => preview({ positionY })} onCommit={(positionY) => adjust({ positionY })} />
+    </div>
     <h3>Playback</h3>
     <RangeControl label="Volume" value={clip.volume} resetValue={1} min={0} max={2} step={0.05} onPreview={(volume) => preview({ volume })} onCommit={(volume) => adjust({ volume })} />
     <RangeControl label="Speed" value={clip.speed} resetValue={1} min={0.5} max={2} step={0.05} suffix="×" onPreview={(speed) => preview({ speed })} onCommit={(speed) => adjust({ speed })} />
@@ -317,41 +456,226 @@ function ClipInspector({ state, clip, dispatch, previewClip, setError }: { state
   </div>;
 }
 
-type TimelineProps = { state: ProjectState; playheadMs: number; selectedClipId: string; onSelect(id: string): void; onSeek(ms: number): void; dispatch(command: CommandInput): ProjectState; setError(message: string): void };
-const Timeline = forwardRef<HTMLDivElement, TimelineProps>(function Timeline({ state, playheadMs, selectedClipId, onSelect, onSeek, dispatch, setError }, ref) {
-  const [dragging, setDragging] = useState("");
+function AudioWaveform({ peaks, clip, durationMs }: { peaks: number[]; clip: Clip; durationMs: number }) {
+  if (peaks.length < 2 || durationMs <= 0) return null;
+  const start = Math.floor((clip.sourceInMs / durationMs) * peaks.length);
+  const end = Math.max(start + 2, Math.ceil((clip.sourceOutMs / durationMs) * peaks.length));
+  const values = peaks.slice(start, end);
+  if (values.length < 2) return null;
+  const gain = clip.muted ? 0.08 : clip.volume;
+  const amplitude = (peak: number) => Math.min(1, peak * gain) * 0.42;
+  const top = values.map((peak, index) => `${index},${0.5 - amplitude(peak)}`).join(" L");
+  const bottom = values.map((peak, index) => `${values.length - index - 1},${0.5 + amplitude(values[values.length - index - 1])}`).join(" L");
+  return <svg className="pointer-events-none absolute inset-0 h-full w-full" viewBox={`0 0 ${values.length - 1} 1`} preserveAspectRatio="none" aria-hidden="true"><path d={`M${top} L${bottom} Z`} fill={clip.muted ? "#829b9620" : "#57b7a43d"} /></svg>;
+}
+
+function formatTimelineTime(milliseconds: number) {
+  const seconds = Math.floor(milliseconds / 1000);
+  return [Math.floor(seconds / 3600), Math.floor(seconds / 60) % 60, seconds % 60].map((part) => String(part).padStart(2, "0")).join(":");
+}
+
+type TimelineProps = { state: ProjectState; waveform: number[]; snapEnabled: boolean; isPlaying: boolean; playheadMs: number; selectedClipId: string; onSelect(id: string): void; onSeek(ms: number): void; dispatch(command: CommandInput): ProjectState; setError(message: string): void };
+function Timeline({ state, waveform, snapEnabled, isPlaying, playheadMs, selectedClipId, onSelect, onSeek, dispatch, setError }: TimelineProps) {
+  const [moving, setMoving] = useState<{ clipId: string; startMs: number } | null>(null);
+  const [trimming, setTrimming] = useState<{ clipId: string; startMs: number; durationMs: number; sourceInMs: number; sourceOutMs: number } | null>(null);
+  const [trackWidth, setTrackWidth] = useState(0);
+  const [viewportWidth, setViewportWidth] = useState(0);
+  const [zoom, setZoom] = useState(1);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const trackRef = useRef<HTMLDivElement>(null);
   const entries = timelineClips(state);
   const total = timelineDuration(state);
-  const width = Math.max(900, total / 1000 * 14);
+  const naturalWidth = total / 1000 * 14;
+  const width = Math.max(viewportWidth, naturalWidth * zoom);
+  const majorSeconds = ([1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600] as const).find((seconds) => seconds * 1000 / total * width >= 72) ?? 600;
+  const majorMs = majorSeconds * 1000;
+  const minorWidth = majorMs / 4 / total * width;
+  const rulerMarks = Array.from({ length: Math.floor(total / majorMs) + 1 }, (_, index) => index * majorMs);
+  useEffect(() => {
+    const track = trackRef.current;
+    const viewport = scrollRef.current;
+    if (!track || !viewport) return;
+    const observer = new ResizeObserver(() => { setTrackWidth(track.clientWidth); setViewportWidth(Math.max(1, viewport.clientWidth - 20)); });
+    observer.observe(track);
+    observer.observe(viewport);
+    setTrackWidth(track.clientWidth);
+    setViewportWidth(Math.max(1, viewport.clientWidth - 20));
+    return () => observer.disconnect();
+  }, []);
+  const zoomTimeline = (event: WheelEvent) => {
+    if (!event.altKey || !scrollRef.current || naturalWidth <= 0) return;
+    event.preventDefault();
+    const container = scrollRef.current;
+    const rect = container.getBoundingClientRect();
+    const pointerX = event.clientX - rect.left;
+    const timelineRatio = (container.scrollLeft + pointerX) / Math.max(1, trackWidth);
+    const availableWidth = Math.max(1, container.clientWidth - 20);
+    const minimum = Math.min(1, availableWidth / naturalWidth);
+    const next = Math.max(minimum, Math.min(12, zoom * Math.exp(-event.deltaY * 0.003)));
+    const nextWidth = Math.max(availableWidth, naturalWidth * next);
+    setZoom(next);
+    requestAnimationFrame(() => { container.scrollLeft = Math.max(0, timelineRatio * nextWidth - pointerX); });
+  };
+  useEffect(() => {
+    const container = scrollRef.current;
+    if (!container) return;
+    container.addEventListener("wheel", zoomTimeline, { passive: false });
+    return () => container.removeEventListener("wheel", zoomTimeline);
+  }, [naturalWidth, trackWidth, zoom]);
+  useEffect(() => {
+    const container = scrollRef.current;
+    if (!isPlaying || !container || !trackWidth || !total) return;
+    const playheadX = playheadMs / total * trackWidth;
+    const left = container.scrollLeft;
+    const right = left + container.clientWidth - 20;
+    if (playheadX < left || playheadX > right) container.scrollLeft = Math.max(0, playheadX - 10);
+  }, [isPlaying, playheadMs, total, trackWidth]);
+  const seekAt = (clientX: number, element: HTMLElement) => {
+    const rect = element.closest(".timeline-track")!.getBoundingClientRect();
+    onSeek(Math.max(0, Math.min(total, ((clientX - rect.left) / rect.width) * total)));
+  };
+  const trackDrag = (event: React.PointerEvent, update: (point: { clientX: number; altKey: boolean }) => void, finish: (point: { clientX: number; altKey: boolean }) => void) => {
+    const originX = event.clientX;
+    let point = { clientX: event.clientX, altKey: event.altKey };
+    let dragging = false;
+    let frame = 0;
+    const move = (pointer: PointerEvent) => { point = { clientX: pointer.clientX, altKey: pointer.altKey }; dragging ||= Math.abs(pointer.clientX - originX) > 2; update(point); };
+    const scroll = () => {
+      const container = scrollRef.current;
+      if (container && dragging) {
+        const rect = container.getBoundingClientRect();
+        const edge = 56;
+        const speed = point.clientX < rect.left + edge
+          ? -20 * Math.min(1, (rect.left + edge - point.clientX) / edge)
+          : point.clientX > rect.right - edge
+            ? 20 * Math.min(1, (point.clientX - rect.right + edge) / edge)
+            : 0;
+        if (speed) {
+          const before = container.scrollLeft;
+          container.scrollLeft += speed;
+          if (container.scrollLeft !== before) update(point);
+        }
+      }
+      frame = requestAnimationFrame(scroll);
+    };
+    const up = (pointer: PointerEvent) => {
+      point = { clientX: pointer.clientX, altKey: pointer.altKey };
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      cancelAnimationFrame(frame);
+      finish(point);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up, { once: true });
+    frame = requestAnimationFrame(scroll);
+  };
+  const moveClip = (event: React.PointerEvent<HTMLElement>, clip: Clip) => {
+    if (event.button !== 0 || (event.target as HTMLElement).closest("[data-trim-handle]")) return;
+    event.preventDefault();
+    const startX = event.clientX;
+    const startScroll = scrollRef.current?.scrollLeft ?? 0;
+    const originalStart = clip.timelineStartMs;
+    const durationMs = clipDuration(clip);
+    let destination = originalStart;
+    let moved = false;
+    const move = (pointer: { clientX: number; altKey: boolean }) => {
+      const scrollDelta = (scrollRef.current?.scrollLeft ?? 0) - startScroll;
+      const raw = Math.max(0, originalStart + (pointer.clientX - startX + scrollDelta) / Math.max(1, trackWidth) * total);
+      destination = raw;
+      if (snapEnabled !== pointer.altKey) {
+        const threshold = 8 / Math.max(1, trackWidth) * total;
+        const targets = [0, playheadMs, ...entries.filter((entry) => entry.clip.id !== clip.id).flatMap((entry) => [entry.startMs, entry.endMs])];
+        let closest = threshold + 1;
+        for (const target of targets) for (const edge of [raw, raw + durationMs]) {
+          const distance = Math.abs(target - edge);
+          if (distance < closest) { closest = distance; destination = Math.max(0, raw + target - edge); }
+        }
+      }
+      moved ||= Math.abs(pointer.clientX - startX) > 2 || Math.abs((scrollRef.current?.scrollLeft ?? 0) - startScroll) > 2;
+      setMoving({ clipId: clip.id, startMs: destination });
+    };
+    const finish = (pointer: { clientX: number; altKey: boolean }) => {
+      move(pointer);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      setMoving(null);
+      if (moved && Math.abs(destination - originalStart) >= 1) {
+        try { dispatch({ type: "move_clip", actor: "human", clipId: clip.id, timelineStartMs: Math.round(destination) }); }
+        catch (cause) { setError((cause as Error).message); }
+      }
+    };
+    document.body.style.cursor = "grabbing";
+    document.body.style.userSelect = "none";
+    trackDrag(event, move, finish);
+  };
   const trim = (event: React.PointerEvent, clip: Clip, edge: "in" | "out") => {
+    event.preventDefault();
     event.stopPropagation();
     const startX = event.clientX;
+    const startScroll = scrollRef.current?.scrollLeft ?? 0;
     const startIn = clip.sourceInMs; const startOut = clip.sourceOutMs;
-    const trackWidth = (event.currentTarget.closest(".timeline-track") as HTMLElement).offsetWidth;
-    const finish = (up: PointerEvent) => {
-      window.removeEventListener("pointerup", finish);
-      const delta = ((up.clientX - startX) / trackWidth) * total * clip.speed;
-      const sourceInMs = edge === "in" ? Math.max(0, Math.min(startOut - 50, startIn + delta)) : startIn;
-      const sourceOutMs = edge === "out" ? Math.min(state.durationMs, Math.max(startIn + 50, startOut + delta)) : startOut;
-      try { dispatch({ type: "trim_clip", actor: "human", clipId: clip.id, sourceInMs, sourceOutMs }); } catch (cause) { setError((cause as Error).message); }
+    const timelineWidth = (event.currentTarget.closest(".timeline-track") as HTMLElement).offsetWidth;
+    const calculate = (pointer: { clientX: number; altKey: boolean }) => {
+      const scrollDelta = (scrollRef.current?.scrollLeft ?? 0) - startScroll;
+      let timelineDelta = ((pointer.clientX - startX + scrollDelta) / timelineWidth) * total;
+      if (snapEnabled !== pointer.altKey) {
+        const movingEdge = clip.timelineStartMs + (edge === "out" ? clipDuration(clip) : 0) + timelineDelta;
+        const threshold = 8 / timelineWidth * total;
+        const targets = [0, playheadMs, ...entries.filter((entry) => entry.clip.id !== clip.id).flatMap((entry) => [entry.startMs, entry.endMs])];
+        const closest = targets.reduce<{ target: number; distance: number } | null>((best, target) => {
+          const distance = Math.abs(target - movingEdge);
+          return distance <= threshold && (!best || distance < best.distance) ? { target, distance } : best;
+        }, null);
+        if (closest) timelineDelta += closest.target - movingEdge;
+      }
+      const sourceDelta = timelineDelta * clip.speed;
+      const sourceInMs = edge === "in" ? Math.max(0, Math.min(startOut - 50, startIn + sourceDelta)) : startIn;
+      const sourceOutMs = edge === "out" ? Math.min(state.durationMs, Math.max(startIn + 50, startOut + sourceDelta)) : startOut;
+      return { clipId: clip.id, startMs: clip.timelineStartMs + (sourceInMs - startIn) / clip.speed, durationMs: (sourceOutMs - sourceInMs) / clip.speed, sourceInMs, sourceOutMs };
     };
-    window.addEventListener("pointerup", finish, { once: true });
+    const move = (pointer: { clientX: number; altKey: boolean }) => setTrimming(calculate(pointer));
+    const finish = (up: { clientX: number; altKey: boolean }) => {
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      const result = calculate(up);
+      setTrimming(null);
+      if (Math.abs(result.sourceInMs - startIn) < 1 && Math.abs(result.sourceOutMs - startOut) < 1) return;
+      try { dispatch({ type: "trim_clip", actor: "human", clipId: clip.id, sourceInMs: result.sourceInMs, sourceOutMs: result.sourceOutMs }); } catch (cause) { setError((cause as Error).message); }
+    };
+    document.body.style.cursor = "ew-resize";
+    document.body.style.userSelect = "none";
+    trackDrag(event, move, finish);
   };
-  return <div className="timeline-scroll"><div ref={ref} className="timeline-track" style={{ width }} onClick={(event) => { const rect = event.currentTarget.getBoundingClientRect(); onSeek(((event.clientX - rect.left) / rect.width) * total); }}>
-    <div className="playhead-line" style={{ left: `${(playheadMs / Math.max(1, total)) * 100}%` }}><span /></div>
+  const dragPlayhead = (event: React.PointerEvent) => {
+    if (event.button !== 0 || !trackRef.current) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const update = (point: { clientX: number }) => { if (trackRef.current) seekAt(point.clientX, trackRef.current); };
+    update(event);
+    trackDrag(event, update, update);
+  };
+  return <div ref={scrollRef} className="relative min-h-0 select-none overflow-auto px-2.5 pt-[21px] pb-2"><div ref={trackRef} className="timeline-track relative h-full min-h-[60px] min-w-full rounded-[5px]" style={{ width }} onClick={(event) => seekAt(event.clientX, event.currentTarget)}>
+    <div className="absolute -top-[21px] left-0 z-[6] h-[21px] w-full overflow-hidden text-[8px] font-mono text-[#7f8590]" style={{ backgroundImage: "linear-gradient(to right, #3a4049 1px, transparent 1px)", backgroundSize: `${minorWidth}px 6px`, backgroundPosition: "left bottom", backgroundRepeat: "repeat-x" }}>
+      {rulerMarks.map((time) => <span key={time} className="pointer-events-none absolute bottom-1 h-[17px] border-l border-[#68707c] pl-1 leading-none" style={{ left: `${time / total * 100}%` }}>{formatTimelineTime(time)}</span>)}
+      <button type="button" aria-label="Scrub timeline" title="Click or drag to scrub" tabIndex={-1} className="absolute inset-0 size-full touch-none cursor-ew-resize select-none border-0 bg-transparent p-0 outline-none" onPointerDown={dragPlayhead} />
+    </div>
+    <div className="pointer-events-none absolute -top-[18px] -bottom-2.5 z-[7] w-0" style={{ left: Math.round((Math.max(0, Math.min(total, playheadMs)) / Math.max(1, total)) * (trackWidth || width)) }}><svg className="absolute -left-2.5 top-0 h-full w-5 overflow-visible" aria-hidden="true"><line x1="10" x2="10" y1="0" y2="100%" stroke="var(--orange)" strokeWidth="1" shapeRendering="crispEdges" /><path d="M10 0 L17 7 L10 14 L3 7 Z" fill="var(--orange)" /></svg><button
+      type="button" aria-label="Drag playhead" title="Drag playhead"
+      tabIndex={-1} className="pointer-events-auto absolute left-0 top-0 inline-flex size-5 -translate-x-1/2 touch-none cursor-ew-resize select-none border-0 bg-transparent p-0 outline-none"
+      onPointerDown={dragPlayhead}
+    /></div>
     {entries.map(({ clip, startMs, durationMs }, index) => <div
-      key={clip.id} draggable className={`timeline-clip ${selectedClipId === clip.id ? "selected" : ""}`}
-      style={{ left: `${(startMs / total) * 100}%`, width: `${(durationMs / total) * 100}%` }}
-      onClick={(event) => { event.stopPropagation(); onSelect(clip.id); onSeek(startMs); }}
-      onDragStart={() => setDragging(clip.id)} onDragOver={(event) => event.preventDefault()}
-      onDrop={(event) => { event.preventDefault(); if (!dragging || dragging === clip.id) return; const order = state.clips.map((item) => item.id); order.splice(order.indexOf(dragging), 1); order.splice(index, 0, dragging); dispatch({ type: "reorder_clips", actor: "human", clipIds: order }); setDragging(""); }}
+      key={clip.id} className="group absolute top-1 bottom-1 touch-none cursor-grab active:cursor-grabbing"
+      style={{ left: `${((moving?.clipId === clip.id ? moving.startMs : trimming?.clipId === clip.id ? trimming.startMs : startMs) / total) * 100}%`, width: `${((trimming?.clipId === clip.id ? trimming.durationMs : durationMs) / total) * 100}%` }}
+      onPointerDown={(event) => { onSelect(clip.id); moveClip(event, clip); }}
+      onClick={(event) => { event.stopPropagation(); if (!moving) seekAt(event.clientX, event.currentTarget); }}
     >
-      <button className="trim-handle left" aria-label="Trim clip start" onPointerDown={(event) => trim(event, clip, "in")} />
-      <div className="clip-body"><b>{index + 1}</b><span>{formatTime(durationMs)}</span>{clip.transition.type !== "cut" && <i>{clip.transition.type}</i>}</div>
-      <button className="trim-handle right" aria-label="Trim clip end" onPointerDown={(event) => trim(event, clip, "out")} />
+      <button data-trim-handle className={`absolute top-0 left-0 z-[3] h-full w-[9px] cursor-ew-resize rounded-l border-0 bg-[var(--lime)] ${selectedClipId === clip.id ? "opacity-[.85]" : "opacity-0 group-hover:opacity-[.85]"}`} aria-label="Trim clip start" onClick={(event) => event.stopPropagation()} onPointerDown={(event) => trim(event, clip, "in")} />
+      <div className={`relative flex size-full items-center gap-2 overflow-hidden bg-gradient-to-br from-[#293341] to-[#1d252f] px-2.5 ${index === 0 ? "rounded-l-[5px]" : ""} ${index === entries.length - 1 ? "rounded-r-[5px]" : ""} ${selectedClipId === clip.id ? "shadow-[inset_0_0_0_2px_var(--lime)]" : ""}`}><AudioWaveform peaks={waveform} clip={trimming?.clipId === clip.id ? { ...clip, sourceInMs: trimming.sourceInMs, sourceOutMs: trimming.sourceOutMs } : clip} durationMs={state.durationMs} /><b className="relative z-[1] grid size-[22px] shrink-0 place-items-center rounded bg-[#202731cc] text-[10px]">V{index + 1}</b><span className="relative z-[1] font-mono text-[10px] text-[#c0c6cf]">{formatTime(trimming?.clipId === clip.id ? trimming.durationMs : durationMs)}</span>{clip.muted ? <VolumeX className="relative z-[1] ml-auto size-3 shrink-0 text-[#829b96]" aria-hidden="true" /> : <Volume2 className="relative z-[1] ml-auto size-3 shrink-0 text-[#76c7b7]" aria-hidden="true" />}{clip.transition.type !== "cut" && <i className="relative z-[1] whitespace-nowrap text-[8px] not-italic text-[var(--orange)]">{clip.transition.type}</i>}</div>
+      <button data-trim-handle className={`absolute top-0 right-0 z-[3] h-full w-[9px] cursor-ew-resize rounded-r border-0 bg-[var(--lime)] ${selectedClipId === clip.id ? "opacity-[.85]" : "opacity-0 group-hover:opacity-[.85]"}`} aria-label="Trim clip end" onClick={(event) => event.stopPropagation()} onPointerDown={(event) => trim(event, clip, "out")} />
     </div>)}
   </div></div>;
-});
+}
 
 function TranscriptPanel({ state, transcript, playheadMs, dispatch, saveTranscript, seekTimeline, projectId, setError }: { state: ProjectState; transcript: TranscriptWord[]; playheadMs: number; dispatch(command: CommandInput): ProjectState; saveTranscript(words: TranscriptWord[]): ProjectState; seekTimeline(ms: number): void; projectId: string; setError(message: string): void }) {
   const [query, setQuery] = useState("");
@@ -407,7 +731,7 @@ function TranscriptPanel({ state, transcript, playheadMs, dispatch, saveTranscri
       </> : <>
         <select value={provider} onChange={(event) => setProvider(event.target.value as typeof provider)}><option value="cloudflare">Cloudflare Whisper Large v3</option><option value="openai">OpenAI whisper-1 (your key)</option></select>
         {provider === "openai" && <input type="password" autoComplete="off" placeholder="Session-only OpenAI key" value={apiKey} onChange={(event) => setApiKey(event.target.value)} />}
-        <button className="primary-button compact" disabled={!!processing || provider === "openai" && !apiKey} onClick={() => void transcribe()}>{processing || "Transcribe video"}</button>
+        <button className="primary-button compact !shadow-none" disabled={!!processing || provider === "openai" && !apiKey} onClick={() => void transcribe()}>{processing || "Transcribe video"}</button>
       </>}
     </div>
     {transcript.length ? <div className="transcript-words">{visible.map((word) => {

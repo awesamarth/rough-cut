@@ -1,6 +1,6 @@
 import "server-only";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
-import type { ProjectState, TranscriptWord } from "./editor";
+import { migrateProjectState, type ProjectState, type TranscriptWord } from "./editor";
 
 export function cloudflare() {
   return getCloudflareContext().env as CloudflareEnv;
@@ -30,7 +30,7 @@ export function projectResponse(row: ProjectRow) {
     sourceName: row.source_name,
     sourceType: row.source_type,
     sourceSize: row.source_size,
-    state: row.state_json ? JSON.parse(row.state_json) as ProjectState : null,
+    state: row.state_json ? migrateProjectState(JSON.parse(row.state_json) as ProjectState) : null,
     transcript: row.transcript_json ? JSON.parse(row.transcript_json) as TranscriptWord[] : [],
     createdAt: row.created_at,
     updatedAt: row.updated_at,

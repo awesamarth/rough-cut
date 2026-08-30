@@ -7,7 +7,7 @@ type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K>
 export type CommandInput = DistributiveOmit<EditorCommand, "expectedVersion">;
 export type ProjectPayload = {
   id: string; name: string; status: string; version: number; sourceName: string; sourceType: string; sourceSize: number;
-  state: ProjectState | null; transcript: TranscriptWord[]; error?: string;
+  state: ProjectState | null; transcript: TranscriptWord[]; updatedAt: string; error?: string;
 };
 
 export function useEditor(projectId: string) {
@@ -16,6 +16,7 @@ export function useEditor(projectId: string) {
   const [transcript, setTranscriptState] = useState<TranscriptWord[]>([]);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [lastSavedAt, setLastSavedAt] = useState<number | null>(null);
   const stateRef = useRef<ProjectState | null>(null);
   const transcriptRef = useRef<TranscriptWord[]>([]);
   const past = useRef<ProjectState[]>([]);
@@ -33,6 +34,7 @@ export function useEditor(projectId: string) {
     const payload = await response.json() as ProjectPayload;
     if (!response.ok) throw new Error(payload.error || "Could not load project");
     setProject(payload);
+    setLastSavedAt(new Date(payload.updatedAt).getTime());
     install(payload.state);
     transcriptRef.current = payload.transcript;
     setTranscriptState(payload.transcript);
@@ -51,6 +53,7 @@ export function useEditor(projectId: string) {
       });
       const result = await response.json() as { error?: string };
       if (!response.ok) throw new Error(result.error || "Could not save project");
+      setLastSavedAt(Date.now());
     }).catch(async (cause) => {
       setError(cause instanceof Error ? cause.message : "Could not save project");
       await load().catch(() => undefined);
@@ -130,7 +133,7 @@ export function useEditor(projectId: string) {
   }, [install, persist]);
 
   return {
-    project, state, stateRef, transcript, transcriptRef, error, setError, saving,
+    project, state, stateRef, transcript, transcriptRef, error, setError, saving, lastSavedAt,
     initialize, dispatch, previewClip, undo, redo, saveTranscript, reload: load,
     canUndo: past.current.length > 0, canRedo: future.current.length > 0,
   };
