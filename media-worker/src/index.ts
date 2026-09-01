@@ -14,8 +14,9 @@ type Clip = {
   scaleX: number; scaleY: number; positionX: number; positionY: number; fadeInMs: number; fadeOutMs: number;
   transition: { type: "cut" | "crossfade" | "fade-black"; durationMs: number };
 };
-type TimedText = { text: string; startMs: number; endMs: number; position: "top" | "center" | "bottom" };
-type ProjectState = { id: string; name: string; durationMs: number; clips: Clip[]; captions: TimedText[]; overlays: TimedText[] };
+type TimedText = { text: string; startMs: number; endMs: number; position: "top" | "center" | "bottom"; fontSize?: number; color?: "white" | "yellow" | "lime"; background?: boolean };
+type MusicClip = { id: string; assetId: string; name: string; durationMs: number; timelineStartMs: number; sourceInMs: number; sourceOutMs: number; volume: number; muted: boolean; fadeInMs: number; fadeOutMs: number; loop: boolean };
+type ProjectState = { id: string; name: string; durationMs: number; clips: Clip[]; captions: TimedText[]; captionStyle: { size: "small" | "medium" | "large"; color: "white" | "yellow" | "lime"; background: boolean }; overlays: TimedText[]; music: MusicClip[] };
 type Job = { id: string; kind: "export"; status: "queued" | "running" | "complete" | "failed"; error?: string; output?: string; createdAt: string };
 const jobs = new Map<string, Job>();
 const waveformCache = new Map<string, number[]>();
@@ -27,7 +28,7 @@ const cors = {
 };
 const json = (data: unknown, status = 200) => Response.json(data, { status, headers: cors });
 const safeProjectId = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9-]{36}$/i.test(value);
-const sourceUrl = (projectId: string) => `${APP_ORIGIN}/api/projects/${projectId}/media`;
+const sourceUrl = (projectId: string, asset: "media" | "music" = "media", assetId = "") => `${APP_ORIGIN}/api/projects/${projectId}/${asset}${asset === "music" ? `?asset=${encodeURIComponent(assetId)}` : ""}`;
 
 async function run(command: string[]) {
   const process = Bun.spawn(command, { stdout: "pipe", stderr: "pipe" });
@@ -36,8 +37,8 @@ async function run(command: string[]) {
   return { stdout, stderr };
 }
 
-async function download(projectId: string, destination: string) {
-  const response = await fetch(sourceUrl(projectId));
+async function download(projectId: string, destination: string, asset: "media" | "music" = "media", assetId = "") {
+  const response = await fetch(sourceUrl(projectId, asset, assetId));
   if (!response.ok || !response.body) throw new Error(`Source download failed: ${response.status}`);
   await pipeline(Readable.fromWeb(response.body as never), createWriteStream(destination));
 }
@@ -61,11 +62,17 @@ function assTime(ms: number) {
 function assText(text: string) { return text.replaceAll("\\", "\\\\").replaceAll("{", "\\{").replaceAll("}", "\\}").replaceAll("\n", "\\N"); }
 
 async function writeAss(file: string, state: ProjectState) {
-  const header = `[Script Info]\nScriptType: v4.00+\nPlayResX: 1920\nPlayResY: 1080\nScaledBorderAndShadow: yes\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Caption,DejaVu Sans,48,&H00FFFFFF,&H000000FF,&H00101010,&H90000000,-1,0,0,0,100,100,0,0,1,3,1,2,60,60,54,1\nStyle: Overlay,DejaVu Sans,54,&H00FFFFFF,&H000000FF,&H00101010,&H70000000,-1,0,0,0,100,100,0,0,1,3,1,5,60,60,60,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n`;
-  const events = [...state.captions.map((item) => ({ ...item, style: "Caption" })), ...state.overlays.map((item) => ({ ...item, style: "Overlay" }))]
+  const captionSize = { small: 38, medium: 48, large: 58 }[state.captionStyle.size];
+  const captionColor = { white: "&H00FFFFFF", yellow: "&H0066E0FF", lime: "&H0063FFD9" }[state.captionStyle.color];
+  const borderStyle = state.captionStyle.background ? 3 : 1;
+  const background = state.captionStyle.background ? "&H90000000" : "&HFF000000";
+  const header = `[Script Info]\nScriptType: v4.00+\nPlayResX: 1920\nPlayResY: 1080\nScaledBorderAndShadow: yes\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Caption,DejaVu Sans,${captionSize},${captionColor},&H000000FF,&H00101010,${background},-1,0,0,0,100,100,0,0,${borderStyle},3,1,2,60,60,54,1\nStyle: Overlay,DejaVu Sans,54,&H00FFFFFF,&H000000FF,&H00101010,&H90000000,-1,0,0,0,100,100,0,0,3,10,0,5,60,60,60,1\nStyle: OverlayNoBG,DejaVu Sans,54,&H00FFFFFF,&H000000FF,&H00101010,&HFF000000,-1,0,0,0,100,100,0,0,1,3,1,5,60,60,60,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n`;
+  const events = [...state.captions.map((item) => ({ ...item, style: "Caption" })), ...state.overlays.map((item) => ({ ...item, style: item.background === false ? "OverlayNoBG" : "Overlay" }))]
     .map((item) => {
-      const alignment = item.position === "top" ? "{\\an8}" : item.position === "center" ? "{\\an5}" : "{\\an2}";
-      return `Dialogue: 0,${assTime(item.startMs)},${assTime(item.endMs)},${item.style},,0,0,0,,${alignment}${assText(item.text)}`;
+      const alignment = item.position === "top" ? "\\an8" : item.position === "center" ? "\\an5" : "\\an2";
+      const size = item.style.startsWith("Overlay") ? `\\fs${item.fontSize ?? 54}` : "";
+      const color = item.style.startsWith("Overlay") ? `\\c${{ white: "&H00FFFFFF&", yellow: "&H0066E0FF&", lime: "&H0063FFD9&" }[item.color ?? "white"]}` : "";
+      return `Dialogue: 0,${assTime(item.startMs)},${assTime(item.endMs)},${item.style},,0,0,0,,{${alignment}${size}${color}}${assText(item.text)}`;
     }).join("\n");
   await writeFile(file, header + events);
 }
@@ -75,6 +82,9 @@ function validateState(state: ProjectState) {
   for (const clip of state.clips) {
     if (![clip.timelineStartMs, clip.sourceInMs, clip.sourceOutMs, clip.speed, clip.scaleX, clip.scaleY, clip.positionX, clip.positionY].every(Number.isFinite) || clip.timelineStartMs < 0 || clip.sourceInMs < 0 || clip.sourceOutMs <= clip.sourceInMs || clip.sourceOutMs > state.durationMs || clip.speed < 0.5 || clip.speed > 2 || clip.scaleX < 0.25 || clip.scaleX > 4 || clip.scaleY < 0.25 || clip.scaleY > 4 || Math.abs(clip.positionX) > 100 || Math.abs(clip.positionY) > 100) throw new Error("Invalid clip");
   }
+  if (!state.captionStyle || !["small", "medium", "large"].includes(state.captionStyle.size) || !["white", "yellow", "lime"].includes(state.captionStyle.color) || typeof state.captionStyle.background !== "boolean") throw new Error("Invalid caption style");
+  if (!Array.isArray(state.music)) throw new Error("Invalid music");
+  for (const music of state.music) if (!safeProjectId(music.id) || !safeProjectId(music.assetId) || ![music.durationMs, music.timelineStartMs, music.sourceInMs, music.sourceOutMs, music.volume, music.fadeInMs, music.fadeOutMs].every(Number.isFinite) || music.durationMs <= 0 || music.timelineStartMs < 0 || music.sourceInMs < 0 || music.sourceOutMs <= music.sourceInMs || music.sourceOutMs > music.durationMs || music.volume < 0 || music.volume > 2 || typeof music.muted !== "boolean" || typeof music.loop !== "boolean") throw new Error("Invalid music");
 }
 
 async function exportProject(job: Job, state: ProjectState) {
@@ -82,18 +92,22 @@ async function exportProject(job: Job, state: ProjectState) {
   const dir = path.join(DATA_DIR, job.id);
   await mkdir(dir, { recursive: true });
   const input = path.join(dir, "source");
+  const musicInputs = state.music.map((_, index) => path.join(dir, `music-${index}`));
   const output = path.join(dir, "rough-cut.mp4");
   const ass = path.join(dir, "text.ass");
   try {
     validateState(state);
     await download(state.id, input);
+    await Promise.all(state.music.map((music, index) => download(state.id, musicInputs[index], "music", music.assetId)));
     const audio = await hasAudio(input);
     await writeAss(ass, state);
     const filters: string[] = [];
     const clips = [...state.clips].sort((a, b) => a.timelineStartMs - b.timelineStartMs);
-    const totalDuration = Math.max(...clips.map((clip) => clip.timelineStartMs + (clip.sourceOutMs - clip.sourceInMs) / clip.speed));
-    filters.push(`[0:v]trim=start_frame=0:end_frame=1,drawbox=color=black:t=fill,loop=loop=-1:size=1:start=0,setpts=N/30/TB,trim=duration=${seconds(totalDuration)},fps=30[basev]`);
-    if (audio) filters.push(`anullsrc=r=48000:cl=stereo:d=${seconds(totalDuration)}[basea]`);
+    const videoDuration = Math.max(...clips.map((clip) => clip.timelineStartMs + (clip.sourceOutMs - clip.sourceInMs) / clip.speed));
+    const musicEnd = Math.max(0, ...state.music.map((music) => music.loop ? videoDuration : music.timelineStartMs + music.sourceOutMs - music.sourceInMs));
+    const totalDuration = Math.max(videoDuration, musicEnd);
+    filters.push(`color=c=black:s=1920x1080:r=30:d=${seconds(totalDuration)}[basev]`);
+    if (audio || state.music.length) filters.push(`anullsrc=r=48000:cl=stereo:d=${seconds(totalDuration)}[basea]`);
 
     clips.forEach((clip, index) => {
       const duration = (clip.sourceOutMs - clip.sourceInMs) / clip.speed;
@@ -108,7 +122,9 @@ async function exportProject(job: Job, state: ProjectState) {
         "fps=30",
         `eq=brightness=${clip.brightness}:contrast=${clip.contrast}:saturation=${clip.saturation}`,
         `hue=h=${clip.hue}`,
-        `scale=max(2\,trunc(iw*${clip.scaleX}/2)*2):max(2\,trunc(ih*${clip.scaleY}/2)*2)`,
+        "scale=1920:1080:force_original_aspect_ratio=decrease",
+        "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black",
+        `scale=max(2\\,trunc(iw*${clip.scaleX}/2)*2):max(2\\,trunc(ih*${clip.scaleY}/2)*2)`,
         "format=yuva420p",
       ];
       if (fadeIn > 0) videoFilters.push(`fade=t=in:st=0:d=${seconds(fadeIn)}:alpha=1`);
@@ -131,10 +147,29 @@ async function exportProject(job: Job, state: ProjectState) {
       filters.push(`[${video}][v${index}]overlay=x='(main_w-overlay_w)/2+main_w*${clip.positionX}/100':y='(main_h-overlay_h)/2+main_h*${clip.positionY}/100':eof_action=pass:shortest=0:enable='between(t,${seconds(clip.timelineStartMs)},${seconds(end)})'[${nextVideo}]`);
       video = nextVideo;
     });
-    let audioLabel = "";
+    const audioTracks: string[] = [];
     if (audio) {
+      filters.push(`${clips.map((_, index) => `[a${index}]`).join("")}amix=inputs=${clips.length}:duration=longest:normalize=0[sourcea]`);
+      audioTracks.push("[sourcea]");
+    }
+    state.music.forEach((music, index) => {
+      const available = Math.max(0, totalDuration - music.timelineStartMs);
+      const duration = music.loop ? available : Math.min(available, music.sourceOutMs - music.sourceInMs);
+      const musicFilters = [`atrim=start=${seconds(music.sourceInMs)}:end=${seconds(music.sourceOutMs)}`, "asetpts=PTS-STARTPTS", "aresample=48000"];
+      if (music.loop) musicFilters.push(`aloop=loop=-1:size=${Math.max(1, Math.round((music.sourceOutMs - music.sourceInMs) / 1000 * 48000))}`);
+      musicFilters.push(`atrim=duration=${seconds(duration)}`, `volume=${music.muted ? 0 : music.volume}`);
+      const fadeIn = Math.min(music.fadeInMs, duration / 2);
+      const fadeOut = Math.min(music.fadeOutMs, duration / 2);
+      if (fadeIn > 0) musicFilters.push(`afade=t=in:st=0:d=${seconds(fadeIn)}`);
+      if (fadeOut > 0) musicFilters.push(`afade=t=out:st=${seconds(duration - fadeOut)}:d=${seconds(fadeOut)}`);
+      musicFilters.push(`adelay=${Math.round(music.timelineStartMs)}:all=1`);
+      filters.push(`[${index + 1}:a]${musicFilters.join(",")}[music${index}]`);
+      audioTracks.push(`[music${index}]`);
+    });
+    let audioLabel = "";
+    if (audioTracks.length) {
       audioLabel = "aout";
-      filters.push(`[basea]${clips.map((_, index) => `[a${index}]`).join("")}amix=inputs=${clips.length + 1}:duration=longest:normalize=0[${audioLabel}]`);
+      filters.push(`[basea]${audioTracks.join("")}amix=inputs=${audioTracks.length + 1}:duration=longest:normalize=0[${audioLabel}]`);
     }
 
     if (state.captions.length || state.overlays.length) {
@@ -142,8 +177,10 @@ async function exportProject(job: Job, state: ProjectState) {
       video = "vout";
     }
 
-    const args = ["ffmpeg", "-y", "-i", input, "-filter_complex", filters.join(";"), "-map", `[${video}]`];
-    if (audio) args.push("-map", `[${audioLabel}]`, "-c:a", "aac", "-b:a", "192k");
+    const args = ["ffmpeg", "-y", "-i", input];
+    musicInputs.forEach((musicInput) => args.push("-i", musicInput));
+    args.push("-filter_complex", filters.join(";"), "-map", `[${video}]`);
+    if (audioLabel) args.push("-map", `[${audioLabel}]`, "-c:a", "aac", "-b:a", "192k");
     args.push("-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-t", seconds(totalDuration), output);
     await run(args);
     job.status = "complete";
@@ -170,14 +207,15 @@ async function detectSilences(projectId: string, thresholdDb: number, minimumMs:
   }
 }
 
-async function waveform(projectId: string) {
-  const cached = waveformCache.get(projectId);
+async function waveform(projectId: string, asset: "media" | "music" = "media", assetVersion = "") {
+  const cacheKey = `${projectId}:${asset}:${assetVersion}`;
+  const cached = waveformCache.get(cacheKey);
   if (cached) return cached;
   const dir = path.join(DATA_DIR, crypto.randomUUID());
   const input = path.join(dir, "source");
   await mkdir(dir, { recursive: true });
   try {
-    await download(projectId, input);
+    await download(projectId, input, asset, assetVersion);
     if (!await hasAudio(input)) return [];
     const process = Bun.spawn(["ffmpeg", "-v", "error", "-i", input, "-vn", "-ac", "1", "-ar", "800", "-f", "s16le", "-acodec", "pcm_s16le", "-"], { stdout: "pipe", stderr: "pipe" });
     const [buffer, stderr, code] = await Promise.all([new Response(process.stdout).arrayBuffer(), new Response(process.stderr).text(), process.exited]);
@@ -192,7 +230,7 @@ async function waveform(projectId: string) {
     }
     const maximum = Math.max(0.01, ...peaks);
     const normalized = peaks.map((peak) => Math.min(1, peak / maximum));
-    waveformCache.set(projectId, normalized);
+    waveformCache.set(cacheKey, normalized);
     return normalized;
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -231,9 +269,9 @@ Bun.serve({
     }
 
     if (request.method === "POST" && url.pathname === "/waveform") {
-      const input = await request.json().catch(() => null) as { projectId?: string } | null;
-      if (!safeProjectId(input?.projectId)) return json({ error: "Invalid project" }, 400);
-      try { return json({ peaks: await waveform(input.projectId) }); }
+      const input = await request.json().catch(() => null) as { projectId?: string; asset?: "media" | "music"; assetVersion?: string } | null;
+      if (!safeProjectId(input?.projectId) || input.asset !== undefined && input.asset !== "media" && input.asset !== "music" || input.assetVersion !== undefined && (typeof input.assetVersion !== "string" || input.assetVersion.length > 100)) return json({ error: "Invalid project" }, 400);
+      try { return json({ peaks: await waveform(input.projectId, input.asset ?? "media", input.assetVersion ?? "") }); }
       catch (error) { return json({ error: error instanceof Error ? error.message : String(error) }, 500); }
     }
 

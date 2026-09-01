@@ -20,7 +20,7 @@ WebMCP tools ───┘
 
 ## Non-negotiables
 
-- Single source video is the deliberate v1 scope.
+- One immutable source video plus one optional background-music asset is the deliberate v1 scope.
 - Human UX must be complete; this is agent-native, not agent-only.
 - Real uploads, transcription, persistence, processing, and exports—no fake tool results.
 - Agent actions visibly update the editor and remain undoable.
@@ -36,7 +36,8 @@ WebMCP tools ───┘
 - Timeline with trim handles and drag-to-reorder clips.
 - Inspector for brightness, contrast, saturation, hue, volume/mute, and speed.
 - Cuts, crossfades, fade-to-black, fade-in, and fade-out.
-- Captions, simple text overlays, and B-roll markers/briefs.
+- Editable caption and text-overlay lanes, caption styling, and B-roll markers/briefs.
+- A linked source-audio lane plus one independent background-music lane with trim, move, loop, volume, mute, and fades.
 - Silence suggestions that can be reviewed before removal.
 - Undo/redo, autosave, edit history, and an agent-activity feed.
 - Keyboard editing follows NLE conventions: Backspace lift-deletes and leaves the gap; Delete ripple-deletes and closes the removed span.
@@ -47,6 +48,7 @@ WebMCP tools ───┘
 - Clips reference `[sourceInMs, sourceOutMs)` ranges from the immutable source.
 - Timeline positions derive from clip order and transition durations.
 - Captions, protected ranges, and B-roll markers anchor to words/clips so they survive reordering.
+- Fixed semantic lanes are S1 subtitles, V2 text/graphics, V1 source video, A1 linked source audio, and A2 background music; this is not a general multi-track compositor.
 - Every mutation increments `project_version` and stores enough history for undo/redo.
 - Mutating tools receive `expected_version`. If the human changed version 12 to 13, an agent call expecting 12 is rejected as stale and must reread before retrying.
 
@@ -64,14 +66,16 @@ Keep schemas narrow, validate all input, and return the new version plus a struc
 
 ### Process and edit
 
+- `rename_project`
 - `transcribe_video`
-- `split_clip` / `trim_clip` / `delete_clip`
+- `split_clip` / `trim_clip` / `delete_clip` / `split_text` / `split_background_music`
 - `remove_segments` (batch)
 - `reorder_clips` / `move_clip`
 - `adjust_clip` (color, transform, volume, speed, fades)
 - `set_transition`
-- `set_captions` / `add_caption` / `remove_caption`
-- `add_text_overlay` / `remove_text_overlay`
+- `set_captions` / `add_caption` / `update_caption` / `remove_caption` / `set_caption_style`
+- `add_text_overlay` / `update_text_overlay` / `remove_text_overlay`
+- `adjust_background_music` / `remove_background_music`
 - `protect_segment` / `unprotect_segment`
 - `mark_broll` / `remove_broll`
 - `undo` / `redo`
@@ -81,6 +85,7 @@ Keep schemas narrow, validate all input, and return the new version plus a struc
 - `render_preview`
 - `export_mp4`
 - `export_edl`
+- `export_srt`
 
 Register only tools valid for the current project state (uploading, processing, ready, exporting). Tool calls and human controls must invoke the same editing commands.
 
@@ -105,7 +110,7 @@ No speaker diarization. “Render” means FFmpeg video generation, not Render.c
 - Durable autosave and safe concurrent human/agent editing.
 - Validated schemas, permissions, ranges, transition limits, and protected ranges.
 - Explicit processing states, progress, cancellation, retry, and useful errors.
-- Actual preview/final output must match the saved timeline.
+- Actual preview/final output must match the saved timeline. Preview and export share a canonical 1920×1080 frame; text uses fixed logical coordinates and the bundled DejaVu Sans Bold font so resizing the editor only scales the completed frame and never reflows it.
 - Tests cover command invariants, silence safeguards, undo, stale versions, and export correctness.
 - Accessible, responsive controls that work inside ChatGPT’s in-app browser and WebMCP-enabled Chrome.
 
@@ -121,7 +126,7 @@ No speaker diarization. “Render” means FFmpeg video generation, not Render.c
 ## Explicitly out of scope for now
 
 - Built-in LLM, chat, or proprietary agent integration.
-- Multiple source videos, multi-camera, or general multi-track editing.
+- Multiple source videos, multi-camera, or general-purpose multi-track editing beyond the fixed text, linked source audio, and background-music lanes.
 - Generated/sourced B-roll; markers and briefs are sufficient.
 - Advanced grading, audio mixing, effects, collaboration, or plugin systems.
 
@@ -134,4 +139,4 @@ No speaker diarization. “Render” means FFmpeg video generation, not Render.c
 
 ## Current status
 
-The editor, versioned command layer, 28 direct WebMCP tools, D1/R2 persistence, Workers AI transcription, local FFmpeg pipeline, authenticated media proxy, exports, tests, public Worker, and public repository are implemented. Sliders preview live; the playhead/ruler supports click-drag scrubbing; the unified clip lane includes real FFmpeg-derived waveforms; preview/timeline/lower panes are vertically resizable; and the timeline supports Option/Alt-wheel zoom, drag-edge auto-scroll, explicit gaps, non-ripple trims, linked movement, snapping, X/Y zoom and pan, and keyboard transport/undo. Component styling is Tailwind-first, global CSS contains only tokens and base behavior, and editor controls have responsive layouts, keyboard focus indicators, accessible names, and reduced-motion behavior. The Cloudflare Container image is deployment-ready but the account must be upgraded to Workers Paid before Cloudflare will accept it. Submission assets still needed: final write-up review and a sub-three-minute YouTube demo.
+The editor, versioned command layer, 37 direct WebMCP tools, D1/R2 persistence, automatic post-upload Workers AI transcription, local and deployed FFmpeg pipelines, authenticated media proxy, exports, tests, public Worker, and public repository are implemented. Sliders preview live; the playhead/ruler supports click-drag scrubbing; fixed S1/V2/V1/A1/A2 lanes expose editable captions, overlays, linked source waveforms, and one real background-music workflow; preview/timeline/lower panes are vertically resizable; and the timeline supports Option/Alt-wheel zoom, drag-edge auto-scroll, explicit gaps, non-ripple trims, linked movement, snapping, X/Y zoom and pan, and keyboard transport/undo. Preview and MP4 export now share a canonical 1920×1080 frame and fixed-coordinate text layout, including the same bundled font, margins, sizing, colours, backgrounds, alignment, and source letterboxing. The landing page keeps a device-local index of opened projects, project renames use the versioned command layer, and MP4 export supports a base-filename dialog plus the native save-location picker where available. Component styling is Tailwind-first, global CSS contains only tokens and base behavior, and editor controls have responsive layouts, keyboard focus indicators, accessible names, and reduced-motion behavior. The Cloudflare Container and latest web Worker are deployed; production smoke tests pass for health/FFmpeg, waveform extraction, silence detection, transcription preparation, Workers AI invocation, canonical MP4 rendering, and named downloads. Submission assets still needed: final write-up review and a sub-three-minute YouTube demo.

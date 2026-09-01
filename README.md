@@ -10,13 +10,14 @@ A human-first, WebMCP-native video editor. Humans edit through the timeline and 
 - Chunked video uploads to R2 and durable project revisions in D1
 - Non-destructive split, non-ripple trim, delete, reorder, explicit gaps, protected ranges, undo and redo
 - Brightness, contrast, saturation, hue, independent X/Y zoom and pan, volume, mute and speed controls
-- Crossfades, fade-through-black, edge fades, captions and text overlays
+- Crossfades, fade-through-black, edge fades, editable styled captions and text overlays
+- Fixed S1/V2/V1/A1/A2 lanes with linked source audio and one background-music track
 - B-roll markers and exact-frame inspection
 - FFmpeg silence detection with configurable speech padding
-- Cloudflare Whisper Large v3 Turbo transcription with word timestamps
+- Automatic post-upload Cloudflare Whisper Large v3 Turbo transcription with word timestamps
 - Optional session-only OpenAI `whisper-1` key
-- Real FFmpeg MP4 rendering and CMX3600-style EDL export
-- 28 direct WebMCP tools with optimistic version checks
+- Canonical 1920×1080 browser preview and FFmpeg MP4 output with fixed-layout text parity, plus CMX3600-style EDL export
+- 37 direct WebMCP tools with optimistic version checks
 - Responsive, keyboard-accessible editor UI styled with Tailwind utilities
 - Editor shortcuts: Space play/pause, Backspace lift-delete, Delete ripple-delete, and Cmd/Ctrl+Z undo
 
@@ -69,11 +70,11 @@ bun run media:deploy
 bun run deploy
 ```
 
-Cloudflare Containers require the Workers Paid plan. The browser talks only to the Next.js `/api/media/*` proxy; the separate media Worker rejects requests without the shared secret.
+Production media processing runs in an on-demand Cloudflare Container on Workers Paid. The browser talks only to the Next.js `/api/media/*` proxy; the separate media Worker rejects requests without the shared secret.
 
 ## Media architecture
 
-Uploaded originals remain immutable. Every edit is stored as source timestamps and parameters. Browser preview uses the source/proxy timeline; FFmpeg applies the same instructions to the original during export.
+Uploaded originals remain immutable. Every edit is stored as source timestamps and parameters. Browser preview and FFmpeg share a canonical 1920×1080 frame, source letterboxing, and fixed-coordinate text layout using the same bundled font and styling.
 
 ```text
 Browser UI ─┐
@@ -88,10 +89,12 @@ Open an editor project in ChatGPT's in-app browser or enable `chrome://flags/#en
 
 - Inspect: `get_project_state`, `get_transcript`, `search_transcript`, `inspect_frame`, `detect_silences`
 - Process: `transcribe_video`
-- Timeline: `split_clip`, `trim_clip`, `delete_clip`, `remove_segments`, `reorder_clips`, `move_clip`, `adjust_clip`, `set_transition`
-- Text and markers: `set_captions`, `add_caption`, `remove_caption`, `add_text_overlay`, `remove_text_overlay`, `protect_segment`, `unprotect_segment`, `mark_broll`, `remove_broll`
+- Project: `rename_project`
+- Timeline: `split_clip`, `split_text`, `split_background_music`, `trim_clip`, `delete_clip`, `remove_segments`, `reorder_clips`, `move_clip`, `adjust_clip`, `set_transition`
+- Text and markers: `set_captions`, `add_caption`, `update_caption`, `remove_caption`, `set_caption_style`, `add_text_overlay`, `update_text_overlay`, `remove_text_overlay`, `protect_segment`, `unprotect_segment`, `mark_broll`, `remove_broll`
+- Music: `adjust_background_music`, `remove_background_music`
 - History: `undo`, `redo`
-- Output: `render_preview`, `export_mp4`, `export_edl`
+- Output: `render_preview`, `export_mp4`, `export_edl`, `export_srt`
 
 Every mutation requires the version returned by `get_project_state`. A stale agent receives `STALE_VERSION:<current>` and must reread before retrying. Human and agent actions call the same command layer, increment the same version, remain undoable, and appear in the activity panel.
 

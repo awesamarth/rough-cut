@@ -30,8 +30,8 @@ export async function PUT(request: Request, context: { params: Promise<{ id: str
   const summary = String(input.summary || "Updated project").slice(0, 200);
   const { DB } = cloudflare();
   const stateJson = JSON.stringify(input.state);
-  const update = await DB.prepare(`UPDATE projects SET version = ?, state_json = ?, transcript_json = COALESCE(?, transcript_json), updated_at = CURRENT_TIMESTAMP WHERE id = ? AND version = ? RETURNING version`)
-    .bind(input.state.version, stateJson, input.transcript ? JSON.stringify(input.transcript) : null, id, input.expectedVersion)
+  const update = await DB.prepare(`UPDATE projects SET name = ?, version = ?, state_json = ?, transcript_json = COALESCE(?, transcript_json), updated_at = CURRENT_TIMESTAMP WHERE id = ? AND version = ? RETURNING version`)
+    .bind(input.state.name, input.state.version, stateJson, input.transcript ? JSON.stringify(input.transcript) : null, id, input.expectedVersion)
     .first<{ version: number }>();
 
   if (!update) {

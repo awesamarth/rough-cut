@@ -1,5 +1,7 @@
 @import "tailwindcss";
 
+@font-face { font-family: "RoughCutText"; src: url("/fonts/DejaVuSans-Bold.ttf") format("truetype"); font-weight: 700; font-style: normal; font-display: swap; }
+
 :root {
   --bg: #090a0c;
   --panel: #111318;

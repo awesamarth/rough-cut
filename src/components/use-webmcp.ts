@@ -16,6 +16,7 @@ type Handlers = {
   transcribeVideo(actor?: "human" | "agent", expectedVersion?: number): Promise<ProjectState>;
   exportMp4(): Promise<{ jobId: string; downloadUrl: string }>;
   exportEdl(): string;
+  exportSrt(): string;
   setStatus(status: string): void;
 };
 
@@ -53,9 +54,14 @@ export function useWebMCP(handlers: Handlers) {
     };
     const tools: WebMCPTool[] = [
       {
-        name: "get_project_state", title: "Inspect active video project", description: "Read the active project version, duration, ordered clips, transitions, protected ranges, captions, overlays and B-roll markers. Call before editing.",
+        name: "get_project_state", title: "Inspect active video project", description: "Read the active project version, duration, ordered clips, transitions, protected ranges, captions, caption style, overlays, background music and B-roll markers. Call before editing.",
         annotations: { readOnlyHint: true },
         async execute() { const value = state(); return { ...value, activity: value.activity.slice(0, 20) }; },
+      },
+      {
+        name: "rename_project", title: "Rename project", description: "Change the persisted project name used by the editor and default exports.",
+        inputSchema: mutationSchema({ name: string("New project name") }, ["name"]),
+        async execute(input) { assertVersion(input); return current.current.dispatch({ type: "rename_project", actor: "agent", name: asString(input.name, "name") }); },
       },
       {
         name: "get_transcript", title: "Read transcript", description: "Read a page of word-timestamped transcript for the active source video.",
@@ -86,6 +92,16 @@ export function useWebMCP(handlers: Handlers) {
         name: "split_clip", description: "Split one timeline clip at an exact source-media time.",
         inputSchema: mutationSchema({ clip_id: string("Clip ID from get_project_state"), source_ms: number("Source-media split time in milliseconds") }, ["clip_id", "source_ms"]),
         async execute(input) { assertVersion(input); return current.current.dispatch({ type: "split_clip", actor: "agent", clipId: asString(input.clip_id, "clip_id"), sourceMs: asNumber(input.source_ms, "source_ms") }); },
+      },
+      {
+        name: "split_text", description: "Split one caption or text-overlay clip at an exact timeline time.",
+        inputSchema: mutationSchema({ kind: { type: "string", enum: ["caption", "overlay"] }, item_id: string("Caption or overlay ID"), timeline_ms: number("Timeline split position") }, ["kind", "item_id", "timeline_ms"]),
+        async execute(input) { assertVersion(input); if (input.kind !== "caption" && input.kind !== "overlay") throw new Error("Invalid text kind"); return current.current.dispatch({ type: "split_text", actor: "agent", kind: input.kind, id: asString(input.item_id, "item_id"), timelineMs: asNumber(input.timeline_ms, "timeline_ms") }); },
+      },
+      {
+        name: "split_background_music", description: "Split one non-looping A2 music clip at an exact timeline time.",
+        inputSchema: mutationSchema({ clip_id: string("Music clip ID"), timeline_ms: number("Timeline split position") }, ["clip_id", "timeline_ms"]),
+        async execute(input) { assertVersion(input); return current.current.dispatch({ type: "split_music", actor: "agent", clipId: asString(input.clip_id, "clip_id"), timelineMs: asNumber(input.timeline_ms, "timeline_ms") }); },
       },
       {
         name: "trim_clip", description: "Set a clip's source in and out points without rippling later clips.",
@@ -133,19 +149,43 @@ export function useWebMCP(handlers: Handlers) {
         async execute(input) { assertVersion(input); const position = input.position === "top" || input.position === "center" ? input.position : "bottom"; return current.current.dispatch({ type: "add_caption", actor: "agent", item: { text: asString(input.text, "text"), startMs: asNumber(input.start_ms, "start_ms"), endMs: asNumber(input.end_ms, "end_ms"), position } }); },
       },
       {
+        name: "update_caption", description: "Edit an existing caption's text, timing or position.",
+        inputSchema: mutationSchema({ caption_id: string("Caption ID"), text: { type: "string" }, start_ms: number("Timeline start"), end_ms: number("Timeline end"), position: { type: "string", enum: ["top", "center", "bottom"] } }, ["caption_id"]),
+        async execute(input) { assertVersion(input); const patch: Record<string, unknown> = {}; if (input.text !== undefined) patch.text = asString(input.text, "text"); if (input.start_ms !== undefined) patch.startMs = asNumber(input.start_ms, "start_ms"); if (input.end_ms !== undefined) patch.endMs = asNumber(input.end_ms, "end_ms"); if (input.position !== undefined) { if (input.position !== "top" && input.position !== "center" && input.position !== "bottom") throw new Error("Invalid position"); patch.position = input.position; } return current.current.dispatch({ type: "update_caption", actor: "agent", id: asString(input.caption_id, "caption_id"), patch }); },
+      },
+      {
+        name: "set_caption_style", description: "Set the shared subtitle size, color and background treatment.",
+        inputSchema: mutationSchema({ size: { type: "string", enum: ["small", "medium", "large"] }, color: { type: "string", enum: ["white", "yellow", "lime"] }, background: { type: "boolean" } }),
+        async execute(input) { assertVersion(input); const patch: Record<string, unknown> = {}; if (input.size !== undefined) { if (input.size !== "small" && input.size !== "medium" && input.size !== "large") throw new Error("Invalid size"); patch.size = input.size; } if (input.color !== undefined) { if (input.color !== "white" && input.color !== "yellow" && input.color !== "lime") throw new Error("Invalid color"); patch.color = input.color; } if (input.background !== undefined) { if (typeof input.background !== "boolean") throw new Error("background must be boolean"); patch.background = input.background; } return current.current.dispatch({ type: "set_caption_style", actor: "agent", patch }); },
+      },
+      {
         name: "remove_caption", description: "Remove one caption by ID.",
         inputSchema: mutationSchema({ caption_id: string("Caption ID") }, ["caption_id"]), annotations: { destructiveHint: true },
         async execute(input) { assertVersion(input); return current.current.dispatch({ type: "remove_caption", actor: "agent", id: asString(input.caption_id, "caption_id") }); },
       },
       {
         name: "add_text_overlay", description: "Add a positioned text overlay at timeline timestamps.",
-        inputSchema: mutationSchema({ text: string("Overlay text"), start_ms: number("Timeline start"), end_ms: number("Timeline end"), position: { type: "string", enum: ["top", "center", "bottom"] } }, ["text", "start_ms", "end_ms"]),
-        async execute(input) { assertVersion(input); const position = input.position === "top" || input.position === "bottom" ? input.position : "center"; return current.current.dispatch({ type: "add_overlay", actor: "agent", item: { text: asString(input.text, "text"), startMs: asNumber(input.start_ms, "start_ms"), endMs: asNumber(input.end_ms, "end_ms"), position } }); },
+        inputSchema: mutationSchema({ text: string("Overlay text"), start_ms: number("Timeline start"), end_ms: number("Timeline end"), position: { type: "string", enum: ["top", "center", "bottom"] }, font_size: number("Font size"), color: { type: "string", enum: ["white", "yellow", "lime"] }, background: { type: "boolean" } }, ["text", "start_ms", "end_ms"]),
+        async execute(input) { assertVersion(input); const position = input.position === "top" || input.position === "bottom" ? input.position : "center"; const color = input.color === "yellow" || input.color === "lime" ? input.color : "white"; return current.current.dispatch({ type: "add_overlay", actor: "agent", item: { text: asString(input.text, "text"), startMs: asNumber(input.start_ms, "start_ms"), endMs: asNumber(input.end_ms, "end_ms"), position, fontSize: input.font_size === undefined ? 54 : asNumber(input.font_size, "font_size"), color, background: input.background !== false } }); },
+      },
+      {
+        name: "update_text_overlay", description: "Edit an existing text overlay's text, timing or position.",
+        inputSchema: mutationSchema({ overlay_id: string("Overlay ID"), text: { type: "string" }, start_ms: number("Timeline start"), end_ms: number("Timeline end"), position: { type: "string", enum: ["top", "center", "bottom"] }, font_size: number("Font size"), color: { type: "string", enum: ["white", "yellow", "lime"] }, background: { type: "boolean" } }, ["overlay_id"]),
+        async execute(input) { assertVersion(input); const patch: Record<string, unknown> = {}; if (input.text !== undefined) patch.text = asString(input.text, "text"); if (input.start_ms !== undefined) patch.startMs = asNumber(input.start_ms, "start_ms"); if (input.end_ms !== undefined) patch.endMs = asNumber(input.end_ms, "end_ms"); if (input.position !== undefined) { if (input.position !== "top" && input.position !== "center" && input.position !== "bottom") throw new Error("Invalid position"); patch.position = input.position; } if (input.font_size !== undefined) patch.fontSize = asNumber(input.font_size, "font_size"); if (input.color !== undefined) { if (input.color !== "white" && input.color !== "yellow" && input.color !== "lime") throw new Error("Invalid color"); patch.color = input.color; } if (input.background !== undefined) { if (typeof input.background !== "boolean") throw new Error("background must be boolean"); patch.background = input.background; } return current.current.dispatch({ type: "update_overlay", actor: "agent", id: asString(input.overlay_id, "overlay_id"), patch }); },
       },
       {
         name: "remove_text_overlay", description: "Remove one text overlay by ID.",
         inputSchema: mutationSchema({ overlay_id: string("Overlay ID") }, ["overlay_id"]), annotations: { destructiveHint: true },
         async execute(input) { assertVersion(input); return current.current.dispatch({ type: "remove_overlay", actor: "agent", id: asString(input.overlay_id, "overlay_id") }); },
+      },
+      {
+        name: "adjust_background_music", description: "Adjust the uploaded A2 background-music track. The human must upload the audio asset first.",
+        inputSchema: mutationSchema({ clip_id: string("Music clip ID"), timeline_start_ms: number("Timeline start"), source_in_ms: number("Music source in"), source_out_ms: number("Music source out"), volume: { type: "number", minimum: 0, maximum: 2 }, muted: { type: "boolean" }, fade_in_ms: number("Fade in"), fade_out_ms: number("Fade out"), loop: { type: "boolean" } }, ["clip_id"]),
+        async execute(input) { assertVersion(input); if (!state().music.length) throw new Error("Background music has not been uploaded"); const patch: Record<string, number | boolean> = {}; for (const [source, target] of [["timeline_start_ms", "timelineStartMs"], ["source_in_ms", "sourceInMs"], ["source_out_ms", "sourceOutMs"], ["volume", "volume"], ["fade_in_ms", "fadeInMs"], ["fade_out_ms", "fadeOutMs"]] as const) if (input[source] !== undefined) patch[target] = asNumber(input[source], source); for (const [source, target] of [["muted", "muted"], ["loop", "loop"]] as const) if (input[source] !== undefined) { if (typeof input[source] !== "boolean") throw new Error(`${source} must be boolean`); patch[target] = input[source] as boolean; } return current.current.dispatch({ type: "adjust_music", actor: "agent", clipId: asString(input.clip_id, "clip_id"), patch }); },
+      },
+      {
+        name: "remove_background_music", description: "Remove one A2 background-music clip. Set ripple true to close the resulting A2 gap.", inputSchema: mutationSchema({ clip_id: string("Music clip ID"), ripple: { type: "boolean" } }, ["clip_id"]), annotations: { destructiveHint: true },
+        async execute(input) { assertVersion(input); if (input.ripple !== undefined && typeof input.ripple !== "boolean") throw new Error("ripple must be boolean"); return current.current.dispatch({ type: "remove_music", actor: "agent", clipId: asString(input.clip_id, "clip_id"), ripple: input.ripple === true }); },
       },
       {
         name: "protect_segment", description: "Protect a source range so later destructive edits cannot remove it.",
@@ -171,6 +211,7 @@ export function useWebMCP(handlers: Handlers) {
       { name: "render_preview", description: "Render an accurate MP4 preview from the original video and current edit instructions.", async execute() { return current.current.exportMp4(); } },
       { name: "export_mp4", description: "Render and download the final MP4 from the original source.", async execute() { return current.current.exportMp4(); } },
       { name: "export_edl", description: "Generate and download a CMX3600-style EDL for the current cut.", async execute() { return { edl: current.current.exportEdl() }; } },
+      { name: "export_srt", description: "Generate and download an SRT subtitle file from the current captions.", async execute() { return { srt: current.current.exportSrt() }; } },
     ];
 
     Promise.all(tools.map((tool) => context.registerTool(tool, { signal: controller.signal })))

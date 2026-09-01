@@ -2,6 +2,7 @@
 
 import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { rememberProject } from "@/lib/local-projects";
 
 export function Uploader() {
   const router = useRouter();
@@ -33,6 +34,7 @@ export function Uploader() {
       const result = await complete.json() as { projectId?: string; error?: string };
       if (!complete.ok || !result.projectId) throw new Error(result.error || "Could not finish upload");
       setProgress(100);
+      rememberProject(result.projectId);
       router.push(`/editor/${result.projectId}`);
     } catch (cause) {
       if (uploadId) void fetch(`/api/uploads/${uploadId}/complete`, { method: "DELETE" });

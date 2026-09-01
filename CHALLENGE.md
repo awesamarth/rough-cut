@@ -4,7 +4,7 @@
 
 Video editors usually make people choose between manual control and opaque AI automation. ROUGH//CUT keeps the human in control while giving any WebMCP-compatible agent precise hands inside the same editor.
 
-A human can upload, preview, scrub, split, trim, move, grade, caption and export a real video without an agent. An external agent can inspect the same project and perform the same versioned edits through 28 directly registered WebMCP tools. There is no built-in chatbot and no proprietary agent integration.
+A human can upload, preview, scrub, split, trim, move, grade, caption, mix background music and export a real video without an agent. An external agent can inspect the same project and perform the same versioned edits through 37 directly registered WebMCP tools. There is no built-in chatbot and no proprietary agent integration.
 
 ## Why WebMCP fits
 
@@ -17,7 +17,8 @@ ROUGH//CUT exposes narrow tools for that workflow:
 - Transcribe the source with word timestamps.
 - Split, trim, delete, move and reorder clips.
 - Adjust color, transforms, speed, volume, fades and transitions.
-- Manage captions, overlays, protected ranges and B-roll briefs.
+- Manage and edit styled captions, overlays, protected ranges and B-roll briefs.
+- Adjust or remove a human-uploaded background-music track.
 - Undo, redo and export MP4 or EDL.
 
 Every mutation requires `expected_version`. If a human edits version 12 while an agent still expects version 12, the agent receives `STALE_VERSION:13`, rereads the project, and plans against reality instead of overwriting the human.
@@ -48,11 +49,11 @@ ROUGH//CUT does not mock media processing:
 - CMX3600-style EDL export preserves explicit record positions.
 - The browser preview uses the immutable source and applies the saved timeline model live.
 
-The FFmpeg service runs in Docker locally and is configured for a Cloudflare Container. Cloudflare requires the Workers Paid plan before that Container can be enabled in production.
+The FFmpeg service runs in Docker locally and in an on-demand Cloudflare Container in production. Production smoke tests cover waveform extraction, silence detection, transcription preparation, Workers AI invocation, and canonical MP4 rendering.
 
 ## UX improvements
 
-The editor includes a unified video/audio clip lane with real waveform data, scalable ruler, draggable playhead, edge trimming, linked clip movement, collision rejection, snapping, edge auto-scroll, pointer-centered timeline zoom, playback-follow scrolling, keyboard transport and undo/redo, resizable work areas, and a responsive inspector.
+The editor includes fixed S1 subtitle, V2 graphics, V1 source-video, A1 linked-audio and A2 background-music lanes with real waveform data, a scalable ruler, draggable playhead, edge trimming, linked clip movement, collision rejection, snapping, edge auto-scroll, pointer-centered timeline zoom, playback-follow scrolling, keyboard transport and undo/redo, resizable work areas, and a responsive inspector.
 
 Clips support explicit gaps and independent X/Y zoom and pan. Preview and FFmpeg export use the same saved values. Component styling is Tailwind-first, controls expose accessible names and states, keyboard focus is visible, and reduced-motion preferences are respected.
 

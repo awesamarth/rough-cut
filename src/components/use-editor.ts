@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { applyCommand, createProjectState, type EditorCommand, type ProjectState, type TranscriptWord } from "@/lib/editor";
+import { rememberProject } from "@/lib/local-projects";
 
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
 export type CommandInput = DistributiveOmit<EditorCommand, "expectedVersion">;
@@ -34,6 +35,7 @@ export function useEditor(projectId: string) {
     const payload = await response.json() as ProjectPayload;
     if (!response.ok) throw new Error(payload.error || "Could not load project");
     setProject(payload);
+    rememberProject(projectId);
     setLastSavedAt(new Date(payload.updatedAt).getTime());
     install(payload.state);
     transcriptRef.current = payload.transcript;
