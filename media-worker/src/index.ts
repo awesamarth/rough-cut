@@ -115,8 +115,10 @@ async function exportProject(job: Job, state: ProjectState) {
       const prior = clips[index - 1];
       const transitionIn = prior?.transition.type === "cut" ? 0 : prior?.transition.durationMs ?? 0;
       const transitionOut = clip.transition.type === "cut" ? 0 : clip.transition.durationMs;
-      const fadeIn = Math.min(Math.max(clip.fadeInMs, transitionIn), duration / 2);
-      const fadeOut = Math.min(Math.max(clip.fadeOutMs, transitionOut), duration / 2);
+      const videoFadeIn = Math.min(Math.max(clip.fadeInMs, transitionIn), duration / 2);
+      const videoFadeOut = Math.min(Math.max(clip.fadeOutMs, clip.transition.type === "crossfade" ? 0 : transitionOut), duration / 2);
+      const audioFadeIn = Math.min(Math.max(clip.fadeInMs, transitionIn), duration / 2);
+      const audioFadeOut = Math.min(Math.max(clip.fadeOutMs, transitionOut), duration / 2);
       const videoFilters = [
         `trim=start=${seconds(clip.sourceInMs)}:end=${seconds(clip.sourceOutMs)}`,
         `setpts=(PTS-STARTPTS)/${clip.speed}`,
@@ -129,14 +131,14 @@ async function exportProject(job: Job, state: ProjectState) {
         `scale=max(2\\,trunc(iw*${clip.scaleX}/2)*2):max(2\\,trunc(ih*${clip.scaleY}/2)*2)`,
         "format=yuva420p",
       ];
-      if (fadeIn > 0) videoFilters.push(`fade=t=in:st=0:d=${seconds(fadeIn)}:alpha=1`);
-      if (fadeOut > 0) videoFilters.push(`fade=t=out:st=${seconds(duration - fadeOut)}:d=${seconds(fadeOut)}:alpha=1`);
+      if (videoFadeIn > 0) videoFilters.push(`fade=t=in:st=0:d=${seconds(videoFadeIn)}:alpha=1`);
+      if (videoFadeOut > 0) videoFilters.push(`fade=t=out:st=${seconds(duration - videoFadeOut)}:d=${seconds(videoFadeOut)}:alpha=1`);
       videoFilters.push(`setpts=PTS+${seconds(clip.timelineStartMs)}/TB`);
       filters.push(`[0:v]${videoFilters.join(",")}[v${index}]`);
       if (audio) {
         const audioFilters = [`atrim=start=${seconds(clip.sourceInMs)}:end=${seconds(clip.sourceOutMs)}`, "asetpts=PTS-STARTPTS", `atempo=${clip.speed}`, `volume=${clip.muted ? 0 : clip.volume}`];
-        if (fadeIn > 0) audioFilters.push(`afade=t=in:st=0:d=${seconds(fadeIn)}`);
-        if (fadeOut > 0) audioFilters.push(`afade=t=out:st=${seconds(duration - fadeOut)}:d=${seconds(fadeOut)}`);
+        if (audioFadeIn > 0) audioFilters.push(`afade=t=in:st=0:d=${seconds(audioFadeIn)}`);
+        if (audioFadeOut > 0) audioFilters.push(`afade=t=out:st=${seconds(duration - audioFadeOut)}:d=${seconds(audioFadeOut)}`);
         audioFilters.push(`adelay=${Math.round(clip.timelineStartMs)}:all=1`);
         filters.push(`[0:a]${audioFilters.join(",")}[a${index}]`);
       }

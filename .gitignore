@@ -40,8 +40,9 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-# local media jobs
+# local media jobs and submission draft
 .media-data/
+CHALLENGE.md
 
 # OpenNext
 .open-next
