@@ -17,7 +17,7 @@ A human-first, WebMCP-native video editor. Humans edit through the timeline and 
 - Automatic post-upload Cloudflare Whisper Large v3 Turbo transcription with word timestamps
 - Optional OpenAI `whisper-1` key, with explicit device-local remembering and no server-side key storage
 - Canonical 1920×1080 browser preview and FFmpeg MP4 output with fixed-layout text parity, plus CMX3600-style EDL export
-- 40 direct WebMCP tools with optimistic version checks
+- 39 direct WebMCP tools with optimistic version checks
 - Responsive, keyboard-accessible editor UI styled with Tailwind utilities
 - Editor shortcuts: Space play/pause, Backspace lift-delete, Delete ripple-delete, and Cmd/Ctrl+Z undo
 
@@ -95,7 +95,7 @@ Open an editor project in ChatGPT's in-app browser or enable `chrome://flags/#en
 - Text and markers: `set_captions`, `add_caption`, `update_caption`, `remove_caption`, `set_caption_style`, `add_text_overlay`, `update_text_overlay`, `remove_text_overlay`, `protect_segment`, `unprotect_segment`, `mark_broll`, `remove_broll`
 - Music: `request_background_music_upload`, `adjust_background_music`, `remove_background_music`
 - History: `undo`, `redo`
-- Output: `render_preview`, `export_mp4`, `export_edl`, `export_srt`
+- Output: `export_mp4`, `export_edl`, `export_srt`
 
 Every mutation requires the version returned by `get_project_state`. A stale agent receives `STALE_VERSION:<current>` and must reread before retrying. Human and agent actions call the same command layer, increment the same version, remain undoable, and appear in the activity panel.
 
