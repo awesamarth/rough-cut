@@ -11,7 +11,7 @@ export default function Home() {
       <section className="m-auto w-[min(900px,100%)] py-[70px]">
         <p className="text-xs font-extrabold tracking-[.2em] text-[var(--lime)] uppercase">Agent-native video editing</p>
         <h1 className="my-4 mb-5 max-w-[800px] text-[clamp(58px,8vw,108px)] leading-[.86] tracking-[-.075em]">Your taste.<br /><em className="font-normal not-italic text-[#aeb2b9]">The agent&apos;s hands.</em></h1>
-        <p className="max-w-[610px] text-[clamp(16px,2vw,20px)] leading-[1.55] text-[#a7abb3]">Upload a real video, edit it yourself, or let any WebMCP agent operate the same precise timeline tools beside you.</p>
+        <p className="max-w-[610px] text-[clamp(16px,2vw,20px)] leading-[1.55] text-[#a7abb3]">Upload a real video, then edit alongside any WebMCP agent, both of you using the same precise timeline tools.</p>
         <Uploader />
         <ProjectLibrary />
       </section>
