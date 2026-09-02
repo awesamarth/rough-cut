@@ -45,6 +45,7 @@ export type CaptionStyle = {
   size: "small" | "medium" | "large";
   color: "white" | "yellow" | "lime";
   background: boolean;
+  backgroundOpacity: number;
 };
 
 export type MusicClip = {
@@ -55,6 +56,7 @@ export type MusicClip = {
   timelineStartMs: number;
   sourceInMs: number;
   sourceOutMs: number;
+  speed: number;
   volume: number;
   muted: boolean;
   fadeInMs: number;
@@ -111,7 +113,7 @@ export type EditorCommand =
   | { type: "remove_caption" | "remove_overlay"; expectedVersion: number; actor: Actor; id: string }
   | { type: "set_music"; expectedVersion: number; actor: Actor; music: Omit<MusicClip, "id"> }
   | { type: "split_music"; expectedVersion: number; actor: Actor; clipId: string; timelineMs: number }
-  | { type: "adjust_music"; expectedVersion: number; actor: Actor; clipId: string; patch: Partial<Pick<MusicClip, "timelineStartMs" | "sourceInMs" | "sourceOutMs" | "volume" | "muted" | "fadeInMs" | "fadeOutMs" | "loop">> }
+  | { type: "adjust_music"; expectedVersion: number; actor: Actor; clipId: string; patch: Partial<Pick<MusicClip, "timelineStartMs" | "sourceInMs" | "sourceOutMs" | "speed" | "volume" | "muted" | "fadeInMs" | "fadeOutMs" | "loop">> }
   | { type: "remove_music"; expectedVersion: number; actor: Actor; clipId: string; ripple?: boolean }
   | { type: "mark_broll"; expectedVersion: number; actor: Actor; startMs: number; endMs: number; label: string }
   | { type: "remove_broll"; expectedVersion: number; actor: Actor; id: string };
@@ -135,7 +137,7 @@ export function createProjectState(id: string, name: string, durationMs: number)
   return {
     id, name, version: 0, durationMs,
     clips: [createClip(0, durationMs)],
-    protectedRanges: [], captions: [], captionStyle: { size: "medium", color: "white", background: true }, overlays: [], music: [], broll: [], activity: [],
+    protectedRanges: [], captions: [], captionStyle: { size: "medium", color: "white", background: true, backgroundOpacity: 0.45 }, overlays: [], music: [], broll: [], activity: [],
   };
 }
 
@@ -170,7 +172,7 @@ export function exportSrt(state: ProjectState) {
 }
 
 export function musicClipEnd(state: ProjectState, music: MusicClip) {
-  return music.loop ? videoTimelineDuration(state) : music.timelineStartMs + music.sourceOutMs - music.sourceInMs;
+  return music.loop ? videoTimelineDuration(state) : music.timelineStartMs + (music.sourceOutMs - music.sourceInMs) / music.speed;
 }
 
 export function musicTimelineEnd(state: ProjectState) {
@@ -186,13 +188,38 @@ export function timelineToSource(state: ProjectState, timelineMs: number) {
   };
 }
 
+export function retimeCaptionsForSpeed(captions: TimedText[], clip: Clip, speed: number) {
+  if (speed === clip.speed) return captions;
+  const oldEnd = clip.timelineStartMs + clipDuration(clip);
+  const ratio = clip.speed / speed;
+  return captions.map((caption) => caption.startMs >= clip.timelineStartMs - 1 && caption.endMs <= oldEnd + 1 ? {
+    ...caption,
+    startMs: clip.timelineStartMs + (caption.startMs - clip.timelineStartMs) * ratio,
+    endMs: clip.timelineStartMs + (caption.endMs - clip.timelineStartMs) * ratio,
+  } : caption);
+}
+
+export function groupCaptionWords(words: TranscriptWord[], maxWords = 5, pauseMs = 700, maxDurationMs = 3000) {
+  const groups: TranscriptWord[][] = [];
+  let group: TranscriptWord[] = [];
+  const flush = () => { if (group.length) groups.push(group); group = []; };
+  for (const word of words) {
+    const previous = group.at(-1);
+    if (previous && (group.length >= maxWords || word.startMs - previous.endMs >= pauseMs || word.endMs - group[0].startMs > maxDurationMs)) flush();
+    group.push(word);
+    if (/[.!?…]["')\]]?$/.test(word.word)) flush();
+  }
+  flush();
+  return groups;
+}
+
 export function migrateProjectState(state: ProjectState): ProjectState {
   let cursor = 0;
   const music = state.music as unknown as MusicClip | MusicClip[] | null | undefined;
   return {
     ...state,
-    captionStyle: state.captionStyle ?? { size: "medium", color: "white", background: true },
-    music: Array.isArray(music) ? music.map((item) => ({ ...item, assetId: item.assetId ?? item.id })) : music ? [{ ...music, assetId: music.id }] : [],
+    captionStyle: state.captionStyle ? { ...state.captionStyle, backgroundOpacity: Number.isFinite(state.captionStyle.backgroundOpacity) ? state.captionStyle.backgroundOpacity : 0.45 } : { size: "medium", color: "white", background: true, backgroundOpacity: 0.45 },
+    music: Array.isArray(music) ? music.map((item) => ({ ...item, assetId: item.assetId ?? item.id, speed: Number.isFinite(item.speed) ? item.speed : 1 })) : music ? [{ ...music, assetId: music.id, speed: Number.isFinite(music.speed) ? music.speed : 1 }] : [],
     clips: state.clips.map((clip) => {
       const migrated = {
         ...clip,
@@ -224,7 +251,7 @@ function normalizeClip(clip: Clip, durationMs: number): Clip {
   const adjustedDuration = (clip.sourceOutMs - clip.sourceInMs) / clip.speed;
   return {
     ...clip,
-    speed: clamp(clip.speed, 0.5, 2), volume: clamp(clip.volume, 0, 2),
+    speed: clamp(clip.speed, 0.5, 2), volume: clamp(clip.volume, 0, 5),
     brightness: clamp(clip.brightness, -1, 1), contrast: clamp(clip.contrast, 0, 2),
     saturation: clamp(clip.saturation, 0, 3), hue: clamp(clip.hue, -180, 180),
     scaleX: clamp(clip.scaleX, 0.25, 4), scaleY: clamp(clip.scaleY, 0.25, 4),
@@ -237,11 +264,13 @@ function normalizeClip(clip: Clip, durationMs: number): Clip {
 function normalizeMusic(music: MusicClip, videoTimelineMs: number): MusicClip {
   validateRange(music.sourceInMs, music.sourceOutMs, music.durationMs);
   const timelineStartMs = music.loop ? clamp(music.timelineStartMs, 0, Math.max(0, videoTimelineMs - 50)) : Math.max(0, music.timelineStartMs);
-  const audibleDuration = music.loop ? videoTimelineMs - timelineStartMs : music.sourceOutMs - music.sourceInMs;
+  const speed = clamp(music.speed, 0.5, 2);
+  const audibleDuration = music.loop ? videoTimelineMs - timelineStartMs : (music.sourceOutMs - music.sourceInMs) / speed;
   return {
     ...music,
     timelineStartMs,
-    volume: clamp(music.volume, 0, 2),
+    speed,
+    volume: clamp(music.volume, 0, 5),
     fadeInMs: clamp(music.fadeInMs, 0, Math.max(0, audibleDuration / 2)),
     fadeOutMs: clamp(music.fadeOutMs, 0, Math.max(0, audibleDuration / 2)),
   };
@@ -314,10 +343,10 @@ export function validateState(value: unknown): asserts value is ProjectState {
       if (typeof item.text !== "string" || !item.text.trim() || !["top", "center", "bottom"].includes(item.position) || item.fontSize !== undefined && (!Number.isFinite(item.fontSize) || item.fontSize < 16 || item.fontSize > 160) || item.color !== undefined && !["white", "yellow", "lime"].includes(item.color) || item.background !== undefined && typeof item.background !== "boolean") throw new Error("Invalid text item");
     });
   }
-  if (!state.captionStyle || !["small", "medium", "large"].includes(state.captionStyle.size) || !["white", "yellow", "lime"].includes(state.captionStyle.color) || typeof state.captionStyle.background !== "boolean") throw new Error("Invalid caption style");
+  if (!state.captionStyle || !["small", "medium", "large"].includes(state.captionStyle.size) || !["white", "yellow", "lime"].includes(state.captionStyle.color) || typeof state.captionStyle.background !== "boolean" || !Number.isFinite(state.captionStyle.backgroundOpacity) || state.captionStyle.backgroundOpacity < 0 || state.captionStyle.backgroundOpacity > 1) throw new Error("Invalid caption style");
   if (!Array.isArray(state.music) || new Set(state.music.map((music) => music.id)).size !== state.music.length) throw new Error("Invalid music");
   state.music.forEach((music) => {
-    if (!/^[a-f0-9-]{36}$/i.test(music.id) || !/^[a-f0-9-]{36}$/i.test(music.assetId) || typeof music.name !== "string" || !music.name.trim() || !Number.isFinite(music.durationMs) || music.durationMs <= 0 || typeof music.muted !== "boolean" || typeof music.loop !== "boolean") throw new Error("Invalid music");
+    if (!/^[a-f0-9-]{36}$/i.test(music.id) || !/^[a-f0-9-]{36}$/i.test(music.assetId) || typeof music.name !== "string" || !music.name.trim() || !Number.isFinite(music.durationMs) || music.durationMs <= 0 || !Number.isFinite(music.speed) || music.speed < 0.5 || music.speed > 2 || typeof music.muted !== "boolean" || typeof music.loop !== "boolean") throw new Error("Invalid music");
     normalizeMusic(music, videoTimelineDuration(state));
   });
   const orderedMusic = [...state.music].sort((a, b) => a.timelineStartMs - b.timelineStartMs);
@@ -387,9 +416,13 @@ export function applyCommand(state: ProjectState, command: EditorCommand): Proje
     case "move_clip":
       next.clips[clipIndex] = { ...next.clips[clipIndex], timelineStartMs: command.timelineStartMs };
       break;
-    case "adjust_clip":
-      next.clips[clipIndex] = normalizeClip({ ...next.clips[clipIndex], ...command.patch }, state.durationMs);
+    case "adjust_clip": {
+      const clip = next.clips[clipIndex];
+      const adjusted = normalizeClip({ ...clip, ...command.patch }, state.durationMs);
+      next.clips[clipIndex] = adjusted;
+      next.captions = retimeCaptionsForSpeed(next.captions, clip, adjusted.speed);
       break;
+    }
     case "set_transition": { 
       const clip = next.clips[clipIndex];
       const following = next.clips[clipIndex + 1];
@@ -446,7 +479,7 @@ export function applyCommand(state: ProjectState, command: EditorCommand): Proje
       break;
     case "set_caption_style":
       next.captionStyle = { ...next.captionStyle, ...command.patch };
-      if (!["small", "medium", "large"].includes(next.captionStyle.size) || !["white", "yellow", "lime"].includes(next.captionStyle.color) || typeof next.captionStyle.background !== "boolean") throw new Error("Invalid caption style");
+      if (!["small", "medium", "large"].includes(next.captionStyle.size) || !["white", "yellow", "lime"].includes(next.captionStyle.color) || typeof next.captionStyle.background !== "boolean" || !Number.isFinite(next.captionStyle.backgroundOpacity) || next.captionStyle.backgroundOpacity < 0 || next.captionStyle.backgroundOpacity > 1) throw new Error("Invalid caption style");
       break;
     case "remove_caption":
       next.captions = next.captions.filter((item) => item.id !== command.id);
@@ -465,7 +498,7 @@ export function applyCommand(state: ProjectState, command: EditorCommand): Proje
       const endMs = musicClipEnd(next, music);
       validateRange(music.timelineStartMs, command.timelineMs, endMs);
       validateRange(command.timelineMs, endMs, endMs);
-      const sourceMs = music.sourceInMs + command.timelineMs - music.timelineStartMs;
+      const sourceMs = music.sourceInMs + (command.timelineMs - music.timelineStartMs) * music.speed;
       const left = { ...music, sourceOutMs: sourceMs, loop: false, fadeOutMs: 0 };
       const right = { ...music, id: id(), timelineStartMs: command.timelineMs, sourceInMs: sourceMs, loop: false, fadeInMs: 0 };
       next.music.splice(index, 1, left, right);

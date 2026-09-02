@@ -15,9 +15,9 @@ A human-first, WebMCP-native video editor. Humans edit through the timeline and 
 - B-roll markers and exact-frame inspection
 - FFmpeg silence detection with configurable speech padding
 - Automatic post-upload Cloudflare Whisper Large v3 Turbo transcription with word timestamps
-- Optional session-only OpenAI `whisper-1` key
+- Optional OpenAI `whisper-1` key, with explicit device-local remembering and no server-side key storage
 - Canonical 1920×1080 browser preview and FFmpeg MP4 output with fixed-layout text parity, plus CMX3600-style EDL export
-- 37 direct WebMCP tools with optimistic version checks
+- 40 direct WebMCP tools with optimistic version checks
 - Responsive, keyboard-accessible editor UI styled with Tailwind utilities
 - Editor shortcuts: Space play/pause, Backspace lift-delete, Delete ripple-delete, and Cmd/Ctrl+Z undo
 
@@ -87,12 +87,13 @@ WebMCP tools ├─ editing commands → D1 revisions
 
 Open an editor project in ChatGPT's in-app browser or enable `chrome://flags/#enable-webmcp-testing`. Tools register directly through `document.modelContext.registerTool`; no agent SDK or built-in chat is used.
 
-- Inspect: `get_project_state`, `get_transcript`, `search_transcript`, `inspect_frame`, `detect_silences`
+- Inspect: `get_project_state`, `get_activity`, `get_transcript`, `search_transcript`, `inspect_frame`, `detect_silences`
 - Process: `transcribe_video`
+- Start: `request_video_upload` (focuses and highlights the human-operated upload control)
 - Project: `rename_project`
 - Timeline: `split_clip`, `split_text`, `split_background_music`, `trim_clip`, `delete_clip`, `remove_segments`, `reorder_clips`, `move_clip`, `adjust_clip`, `set_transition`
 - Text and markers: `set_captions`, `add_caption`, `update_caption`, `remove_caption`, `set_caption_style`, `add_text_overlay`, `update_text_overlay`, `remove_text_overlay`, `protect_segment`, `unprotect_segment`, `mark_broll`, `remove_broll`
-- Music: `adjust_background_music`, `remove_background_music`
+- Music: `request_background_music_upload`, `adjust_background_music`, `remove_background_music`
 - History: `undo`, `redo`
 - Output: `render_preview`, `export_mp4`, `export_edl`, `export_srt`
 

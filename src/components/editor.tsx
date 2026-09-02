@@ -1,9 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { Link2, Magnet, RotateCcw, Unlink2, Volume2, VolumeX } from "lucide-react";
+import { Download, Link2, Magnet, Maximize2, Minimize2, RotateCcw, Unlink2, Volume2, VolumeX } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { clipDuration, exportSrt, musicClipEnd, timelineClips, timelineDuration, timelineToSource, type Clip, type MusicClip, type ProjectState, type TimedText, type TranscriptWord } from "@/lib/editor";
+import { clipDuration, exportSrt, groupCaptionWords, musicClipEnd, timelineClips, timelineDuration, timelineToSource, type Clip, type MusicClip, type ProjectState, type TimedText, type TranscriptWord } from "@/lib/editor";
 import { exportEdl } from "@/lib/edl";
 import { type CommandInput, useEditor } from "./use-editor";
 import { useWebMCP } from "./use-webmcp";
@@ -18,12 +18,12 @@ const cssFilter = (clip?: Clip) => clip ? `brightness(${1 + clip.brightness}) co
 const cssTransform = (clip?: Clip) => clip ? `translate(${clip.positionX}%, ${clip.positionY}%) scale(${clip.scaleX}, ${clip.scaleY})` : undefined;
 const textColor = (color?: "white" | "yellow" | "lime") => color === "yellow" ? "#ffe066" : color === "lime" ? "#d9ff63" : "white";
 
-function PreviewTextLayer({ state, playheadMs, preview }: { state: ProjectState; playheadMs: number; preview: { kind: "caption" | "overlay"; id: string; patch: Partial<TimedText> } | null }) {
+function PreviewTextLayer({ state, playheadMs, preview, captionBackgroundOpacity }: { state: ProjectState; playheadMs: number; preview: { kind: "caption" | "overlay"; id: string; patch: Partial<TimedText> } | null; captionBackgroundOpacity: number | null }) {
   const items = [
-    ...state.overlays.filter((item) => playheadMs >= item.startMs && playheadMs <= item.endMs).map((item) => ({ ...item, ...(preview?.kind === "overlay" && preview.id === item.id ? preview.patch : {}), fontSize: preview?.kind === "overlay" && preview.id === item.id && preview.patch.fontSize !== undefined ? preview.patch.fontSize : item.fontSize ?? 54, color: textColor(item.color), background: item.background !== false, padding: 10 })),
-    ...state.captions.filter((item) => playheadMs >= item.startMs && playheadMs <= item.endMs).map((item) => ({ ...item, fontSize: { small: 38, medium: 48, large: 58 }[state.captionStyle.size], color: textColor(state.captionStyle.color), background: state.captionStyle.background, padding: 3 })),
+    ...state.overlays.filter((item) => playheadMs >= item.startMs && playheadMs <= item.endMs).map((item) => ({ ...item, ...(preview?.kind === "overlay" && preview.id === item.id ? preview.patch : {}), fontSize: preview?.kind === "overlay" && preview.id === item.id && preview.patch.fontSize !== undefined ? preview.patch.fontSize : item.fontSize ?? 54, color: textColor(item.color), background: item.background !== false, backgroundOpacity: 0.47, padding: 10 })),
+    ...state.captions.filter((item) => playheadMs >= item.startMs && playheadMs <= item.endMs).map((item) => ({ ...item, fontSize: { small: 38, medium: 48, large: 58 }[state.captionStyle.size], color: textColor(state.captionStyle.color), background: state.captionStyle.background, backgroundOpacity: captionBackgroundOpacity ?? state.captionStyle.backgroundOpacity, padding: 3 })),
   ];
-  return <svg className="pointer-events-none absolute inset-0 z-4 size-full" viewBox="0 0 1920 1080" preserveAspectRatio="none" aria-hidden="true"><foreignObject width="1920" height="1080"><div className="relative size-full overflow-hidden font-[RoughCutText] font-bold">{items.map((item) => <div key={item.id} className="absolute flex justify-center text-center" style={{ left: 60 - (item.background ? item.padding : 0), right: 60 - (item.background ? item.padding : 0), ...(item.position === "top" ? { top: 60 - (item.background ? item.padding : 0) } : item.position === "bottom" ? { bottom: 60 - (item.background ? item.padding : 0) } : { top: "50%", transform: "translateY(-50%)" }) }}><span style={{ display: "inline-block", maxWidth: "100%", padding: item.background ? item.padding : 0, background: item.background ? "#0007" : "transparent", color: item.color, fontSize: item.fontSize, lineHeight: 1.2, whiteSpace: "pre-wrap", overflowWrap: "break-word", textShadow: "0 2px 3px #000" }}>{item.text}</span></div>)}</div></foreignObject></svg>;
+  return <svg className="pointer-events-none absolute inset-0 z-4 size-full" viewBox="0 0 1920 1080" preserveAspectRatio="none" aria-hidden="true"><foreignObject width="1920" height="1080"><div className="relative size-full overflow-hidden font-[RoughCutText] font-bold">{items.map((item) => <div key={item.id} className="absolute flex justify-center text-center" style={{ left: 60 - (item.background ? item.padding : 0), right: 60 - (item.background ? item.padding : 0), ...(item.position === "top" ? { top: 60 - (item.background ? item.padding : 0) } : item.position === "bottom" ? { bottom: 60 - (item.background ? item.padding : 0) } : { top: "50%", transform: "translateY(-50%)" }) }}><span style={{ display: "inline-block", maxWidth: "100%", padding: item.background ? item.padding : 0, background: item.background ? `rgb(0 0 0 / ${item.backgroundOpacity})` : "transparent", color: item.color, fontSize: item.fontSize, lineHeight: 1.2, whiteSpace: "pre-wrap", overflowWrap: "break-word", textShadow: "0 2px 3px #000" }}>{item.text}</span></div>)}</div></foreignObject></svg>;
 }
 
 function downloadText(name: string, text: string, type = "text/plain") {
@@ -36,30 +36,37 @@ function downloadText(name: string, text: string, type = "text/plain") {
 export function Editor({ projectId }: { projectId: string }) {
   const editor = useEditor(projectId);
   const { project, state, transcript, dispatch, previewClip, initialize, undo, redo, saveTranscript, saving, lastSavedAt, error, setError, canUndo, canRedo } = editor;
+  const previewStageRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const nextVideoRef = useRef<HTMLVideoElement>(null);
   const musicRef = useRef<HTMLAudioElement>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const gainNodes = useRef(new WeakMap<HTMLMediaElement, GainNode>());
   const transitionStarted = useRef(false);
   const initialSeekDone = useRef(false);
   const reconciledVersion = useRef<number | null>(null);
   const reconciledClipId = useRef<string | null>(null);
   const gapFrame = useRef<number | null>(null);
   const exportResetTimer = useRef<number | null>(null);
+  const readyDownloadRef = useRef<HTMLButtonElement>(null);
   const autoTranscribeStarted = useRef(false);
   const [selectedClipId, setSelectedClipId] = useState("");
   const [activeIndex, setActiveIndex] = useState(-1);
   const [playheadMs, setPlayheadMs] = useState(0);
   const [secondaryOpacity, setSecondaryOpacity] = useState(0);
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const [blackOpacity, setBlackOpacity] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [tab, setTab] = useState<"transcript" | "text" | "music" | "silence" | "activity">("transcript");
   const [webmcpStatus, setWebmcpStatus] = useState("Unavailable");
   const [exportStatus, setExportStatus] = useState("");
+  const [readyExport, setReadyExport] = useState<{ downloadUrl: string; filename: string; version: number } | null>(null);
   const [exportDialog, setExportDialog] = useState(false);
   const [exportName, setExportName] = useState("");
   const [renaming, setRenaming] = useState(false);
   const [projectNameDraft, setProjectNameDraft] = useState("");
   const [autoTranscriptionStatus, setAutoTranscriptionStatus] = useState("");
+  const [musicUploadRequested, setMusicUploadRequested] = useState(false);
   const [frame, setFrame] = useState<string | null>(null);
   const [waveform, setWaveform] = useState<number[]>([]);
   const [musicWaveform, setMusicWaveform] = useState<number[]>([]);
@@ -71,6 +78,7 @@ export function Editor({ projectId }: { projectId: string }) {
   const [selectedMusicId, setSelectedMusicId] = useState("");
   const [musicPreview, setMusicPreview] = useState<{ clipId: string; patch: Partial<MusicClip> } | null>(null);
   const [textPreview, setTextPreview] = useState<{ kind: "caption" | "overlay"; id: string; patch: Partial<TimedText> } | null>(null);
+  const [captionOpacityPreview, setCaptionOpacityPreview] = useState<number | null>(null);
 
   useEffect(() => () => { if (exportResetTimer.current !== null) window.clearTimeout(exportResetTimer.current); }, []);
 
@@ -134,20 +142,49 @@ export function Editor({ projectId }: { projectId: string }) {
   const nextClip = orderedClips[activeIndex + 1]?.clip;
 
   useEffect(() => {
+    if (readyExport && state?.version !== readyExport.version) setReadyExport(null);
+  }, [readyExport, state?.version]);
+
+  useEffect(() => {
+    const update = () => setIsFullscreen(document.fullscreenElement === previewStageRef.current);
+    document.addEventListener("fullscreenchange", update);
+    return () => document.removeEventListener("fullscreenchange", update);
+  }, []);
+
+  useEffect(() => {
     if (state && selectedClipId && !state.clips.some((clip) => clip.id === selectedClipId)) setSelectedClipId("");
     if (state && activeIndex >= state.clips.length) setActiveIndex(Math.max(0, state.clips.length - 1));
     if (state && selectedMusicId && !state.music.some((music) => music.id === selectedMusicId)) setSelectedMusicId(state.music[0]?.id ?? "");
     if (state && selectedText && !(selectedText.kind === "caption" ? state.captions : state.overlays).some((item) => item.id === selectedText.id)) setSelectedText(null);
   }, [activeIndex, selectedClipId, selectedMusicId, selectedText, state]);
 
+  const setMediaGain = useCallback((element: HTMLMediaElement, value: number) => {
+    const gain = Math.max(0, Math.min(5, value));
+    let node = gainNodes.current.get(element);
+    if (!node && gain <= 1) { element.volume = gain; return; }
+    try {
+      const context = audioContextRef.current ?? new AudioContext();
+      audioContextRef.current = context;
+      if (context.state === "suspended") void context.resume().catch(() => undefined);
+      if (!node) {
+        node = context.createGain();
+        context.createMediaElementSource(element).connect(node).connect(context.destination);
+        gainNodes.current.set(element, node);
+      }
+      element.volume = 1;
+      node.gain.setValueAtTime(gain, context.currentTime);
+    } catch { element.volume = Math.min(1, gain); }
+  }, []);
+
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !activeClip) return;
     video.playbackRate = activeClip.speed;
-    video.volume = activeClip.muted ? 0 : Math.min(1, activeClip.volume);
-  }, [activeClip]);
+    setMediaGain(video, activeClip.muted ? 0 : activeClip.volume);
+  }, [activeClip, setMediaGain]);
 
   const playVideo = useCallback((video: HTMLVideoElement) => {
+    void audioContextRef.current?.resume();
     void video.play().catch((cause) => {
       if (video.paused) setIsPlaying(false);
       if (!(cause instanceof DOMException) || cause.name !== "AbortError") setError(cause instanceof Error ? cause.message : "Video playback failed");
@@ -161,13 +198,15 @@ export function Editor({ projectId }: { projectId: string }) {
     const endMs = musicClipEnd(state, music);
     const span = music.sourceOutMs - music.sourceInMs;
     const elapsed = targetMs - music.timelineStartMs;
-    const sourceMs = music.sourceInMs + (music.loop ? elapsed % span : elapsed);
+    const sourceElapsed = elapsed * music.speed;
+    const sourceMs = music.sourceInMs + (music.loop ? sourceElapsed % span : sourceElapsed);
+    audio.playbackRate = music.speed;
     if (Math.abs(audio.currentTime * 1000 - sourceMs) > 250) audio.currentTime = sourceMs / 1000;
     const remaining = endMs - targetMs;
     const fade = Math.min(music.fadeInMs ? elapsed / music.fadeInMs : 1, music.fadeOutMs ? remaining / music.fadeOutMs : 1, 1);
-    audio.volume = music.muted ? 0 : Math.min(1, music.volume * Math.max(0, fade));
-    if (play && audio.paused) void audio.play().catch(() => undefined);
-  }, [state]);
+    setMediaGain(audio, music.muted ? 0 : music.volume * Math.max(0, fade));
+    if (play && audio.paused) { void audioContextRef.current?.resume(); void audio.play().catch(() => undefined); }
+  }, [setMediaGain, state]);
 
   const stopGapPlayback = useCallback(() => {
     if (gapFrame.current !== null) cancelAnimationFrame(gapFrame.current);
@@ -270,13 +309,13 @@ export function Editor({ projectId }: { projectId: string }) {
         if (secondary && !transitionStarted.current) {
           secondary.currentTime = nextClip.sourceInMs / 1000;
           secondary.playbackRate = nextClip.speed;
-          secondary.volume = nextClip.muted ? 0 : Math.min(1, nextClip.volume);
+          setMediaGain(secondary, nextClip.muted ? 0 : nextClip.volume);
           transitionStarted.current = true;
           if (!video.paused) void secondary.play();
         }
         setSecondaryOpacity(progress);
-        video.volume = (activeClip.muted ? 0 : Math.min(1, activeClip.volume)) * (1 - progress);
-        if (secondary) secondary.volume = (nextClip.muted ? 0 : Math.min(1, nextClip.volume)) * progress;
+        setMediaGain(video, (activeClip.muted ? 0 : activeClip.volume) * (1 - progress));
+        if (secondary) setMediaGain(secondary, (nextClip.muted ? 0 : nextClip.volume) * progress);
       } else {
         setBlackOpacity(1 - Math.abs(progress * 2 - 1));
       }
@@ -298,13 +337,13 @@ export function Editor({ projectId }: { projectId: string }) {
       setActiveIndex(activeIndex + 1);
       video.currentTime = (nextClip.sourceInMs + overlapMs * nextClip.speed) / 1000;
       video.playbackRate = nextClip.speed;
-      video.volume = nextClip.muted ? 0 : Math.min(1, nextClip.volume);
+      setMediaGain(video, nextClip.muted ? 0 : nextClip.volume);
       transitionStarted.current = false;
       nextVideoRef.current?.pause();
       setSecondaryOpacity(0); setBlackOpacity(0);
       if (!video.paused) playVideo(video);
     }
-  }, [activeClip, activeIndex, nextClip, playVideo, startGapPlayback, state, syncMusic, totalMs]);
+  }, [activeClip, activeIndex, nextClip, playVideo, setMediaGain, startGapPlayback, state, syncMusic, totalMs]);
 
   const handleVideoEnded = useCallback(() => {
     const video = videoRef.current;
@@ -412,6 +451,7 @@ export function Editor({ projectId }: { projectId: string }) {
     const current = editor.stateRef.current;
     if (!current) throw new Error("Project is not ready");
     if (exportResetTimer.current !== null) window.clearTimeout(exportResetTimer.current);
+    setReadyExport(null);
     setExportStatus("Starting export…");
     const response = await fetch(`${MEDIA_URL}/exports`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ state: current }) });
     const job = await response.json() as { id?: string; error?: string };
@@ -422,23 +462,44 @@ export function Editor({ projectId }: { projectId: string }) {
       setExportStatus(status.status === "running" ? "Rendering MP4…" : status.status);
       if (status.status === "failed") throw new Error(status.error || "Export failed");
       if (status.status === "complete") {
-        const downloadUrl = `${MEDIA_URL}/jobs/${job.id}/output`;
+        const name = (baseName?.trim() || current.name) + ".mp4";
+        const downloadUrl = new URL(`${MEDIA_URL}/jobs/${job.id}/output?filename=${encodeURIComponent(name)}`, window.location.origin).toString();
         setExportStatus("Export complete");
         exportResetTimer.current = window.setTimeout(() => { setExportStatus(""); exportResetTimer.current = null; }, 5000);
-        const name = (baseName?.trim() || current.name) + ".mp4";
+        if (!baseName && !fileHandle) {
+          setReadyExport({ downloadUrl, filename: name, version: current.version });
+          requestAnimationFrame(() => { readyDownloadRef.current?.scrollIntoView({ behavior: "smooth", block: "center" }); readyDownloadRef.current?.focus({ preventScroll: true }); });
+          return { status: "human_action_required", jobId: job.id, downloadUrl, filename: name, message: "Export is ready. Ask the human to click the highlighted Download MP4 button in the editor." };
+        }
         if (fileHandle) {
           const response = await fetch(downloadUrl);
           if (!response.ok || !response.body) throw new Error("Could not download export");
           await response.body.pipeTo(await fileHandle.createWritable());
         } else {
           const anchor = document.createElement("a");
-          anchor.href = `${downloadUrl}?filename=${encodeURIComponent(name)}`; anchor.download = name; anchor.click();
+          anchor.href = downloadUrl; anchor.download = name; anchor.click();
         }
-        return { jobId: job.id, downloadUrl };
+        return { status: "download_started", jobId: job.id, downloadUrl, filename: name };
       }
     }
     throw new Error("Export timed out");
   }, [editor.stateRef]);
+
+  const downloadReadyExport = useCallback(async () => {
+    if (!readyExport) return;
+    const picker = (window as Window & { showSaveFilePicker?: (options: { suggestedName: string; types: Array<{ description: string; accept: Record<string, string[]> }> }) => Promise<SaveFileHandle> }).showSaveFilePicker;
+    if (picker) {
+      let handle: SaveFileHandle;
+      try { handle = await picker.call(window, { suggestedName: readyExport.filename, types: [{ description: "MP4 video", accept: { "video/mp4": [".mp4"] } }] }); }
+      catch (cause) { if (cause instanceof DOMException && cause.name === "AbortError") return; throw cause; }
+      const response = await fetch(readyExport.downloadUrl);
+      if (!response.ok || !response.body) throw new Error("Could not download export");
+      await response.body.pipeTo(await handle.createWritable());
+      return;
+    }
+    const anchor = document.createElement("a");
+    anchor.href = readyExport.downloadUrl; anchor.download = readyExport.filename; anchor.click();
+  }, [readyExport]);
 
   const startHumanExport = useCallback(async () => {
     const name = exportName.trim();
@@ -501,6 +562,7 @@ export function Editor({ projectId }: { projectId: string }) {
     stateRef: editor.stateRef, transcriptRef: editor.transcriptRef, dispatch, undo, redo,
     seekTimeline, inspectFrame, detectSilences, transcribeVideo: (actor, expectedVersion) => transcribeVideo(actor, "cloudflare", "", undefined, expectedVersion), exportMp4, exportEdl: exportEdlFile,
     exportSrt: () => { const current = editor.stateRef.current; if (!current) throw new Error("Project is not ready"); const text = exportSrt(current); downloadText(`${current.name}.srt`, text, "application/x-subrip"); return text; },
+    requestBackgroundMusicUpload: () => { const current = editor.stateRef.current; if (current?.music.length) return { status: "already_uploaded", message: "Background music is already available on A2; use adjust_background_music." }; setTab("music"); setMusicUploadRequested(true); return { status: "human_action_required", message: "The Music tab is open and Choose music is highlighted. Ask the human to click it and select a local audio file." }; },
     setStatus: setWebmcpStatus,
   });
 
@@ -513,9 +575,10 @@ export function Editor({ projectId }: { projectId: string }) {
         <div className="flex min-w-0 items-center gap-2.5">{renaming && state ? <form className="flex min-w-0 items-center gap-1.5" onSubmit={(event) => { event.preventDefault(); const name = projectNameDraft.trim(); if (!name) return; dispatch({ type: "rename_project", actor: "human", name }); setRenaming(false); }}><input autoFocus maxLength={120} className="min-w-0 rounded border border-[var(--lime)] bg-[#0b0d10] px-2 py-1 text-[12px] text-white" aria-label="Project name" value={projectNameDraft} onChange={(event) => setProjectNameDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape") setRenaming(false); }} /><button className="cursor-pointer rounded border border-[var(--line)] bg-[#20242b] px-2 py-1 text-[9px]">Save</button></form> : <button className="inline-flex min-w-0 cursor-pointer items-center gap-1.5 overflow-hidden border-0 bg-transparent p-0 text-left text-[13px] font-bold text-white whitespace-nowrap" title="Rename project" onClick={() => { setProjectNameDraft(state?.name ?? project.name); setRenaming(true); }}><span className="overflow-hidden text-ellipsis">{state?.name ?? project.name}</span><span className="text-[10px] text-[var(--muted)]" aria-hidden="true">✎</span></button>}<span className="text-[10px] text-[var(--muted)] max-[900px]:hidden"><SaveStatus saving={saving} savedAt={lastSavedAt} ready={!!state} /></span></div>
         <div className="flex items-center gap-2.25 max-[900px]:col-span-full max-[900px]:flex-wrap">
           <span className="inline-flex items-center gap-1.75 rounded-full border border-[#323740] px-2.5 py-1.5 text-[9px] tracking-[.08em] text-[var(--muted)] uppercase"><b className={`size-1.75 rounded-full ${webmcpStatus === "Ready" ? "bg-[var(--lime)] shadow-[0_0_8px_var(--lime)]" : "bg-[#666]"}`} /> WebMCP {webmcpStatus}</span>
-          <button className="cursor-pointer rounded-[7px] border border-[var(--line)] bg-transparent px-3 py-1.75 text-[10px]" onClick={() => state && downloadText(`${state.name}.edl`, exportEdl(state))}>EDL</button>
-          <button className="cursor-pointer rounded-[7px] border border-[var(--line)] bg-transparent px-3 py-1.75 text-[10px]" disabled={!state?.captions.length} onClick={() => state && downloadText(`${state.name}.srt`, exportSrt(state), "application/x-subrip")}>SRT</button>
-          <button className="cursor-pointer rounded-[7px] border-0 bg-[var(--lime)] px-[13px] py-2 text-[10px] font-extrabold text-[#10120d] shadow-[0_8px_30px_#d9ff6324] hover:bg-[#e5ff93]" disabled={!state || !!exportStatus && exportStatus !== "Export complete"} onClick={() => { setExportName(state?.name ?? "rough-cut"); setExportDialog(true); }}>{exportStatus || "Export MP4"}</button>
+          <button className="inline-flex cursor-pointer items-center gap-1.5 rounded-[7px] border border-[var(--line)] bg-transparent px-3 py-1.75 text-[10px]" onClick={() => state && downloadText(`${state.name}.edl`, exportEdl(state))}><Download className="size-3" aria-hidden="true" />EDL</button>
+          <button className="inline-flex cursor-pointer items-center gap-1.5 rounded-[7px] border border-[var(--line)] bg-transparent px-3 py-1.75 text-[10px]" disabled={!state?.captions.length} onClick={() => state && downloadText(`${state.name}.srt`, exportSrt(state), "application/x-subrip")}><Download className="size-3" aria-hidden="true" />SRT</button>
+          {readyExport && <button ref={readyDownloadRef} className="inline-flex animate-pulse cursor-pointer items-center gap-1.5 rounded-[7px] border-2 border-white bg-[var(--lime)] px-[13px] py-1.5 text-[10px] font-extrabold text-[#10120d] shadow-[0_0_18px_#d9ff6370] motion-reduce:animate-none" onClick={() => void downloadReadyExport().catch((cause) => setError(cause instanceof Error ? cause.message : "Download failed"))}><Download className="size-3" aria-hidden="true" />Download MP4</button>}
+          <button className="inline-flex cursor-pointer items-center gap-1.5 rounded-[7px] border-0 bg-[var(--lime)] px-[13px] py-2 text-[10px] font-extrabold text-[#10120d] shadow-[0_8px_30px_#d9ff6324] hover:bg-[#e5ff93]" disabled={!state || !!exportStatus && exportStatus !== "Export complete"} onClick={() => { setExportName(state?.name ?? "rough-cut"); setExportDialog(true); }}><Download className="size-3" aria-hidden="true" />{exportStatus || "Export MP4"}</button>
         </div>
       </header>
 
@@ -523,7 +586,7 @@ export function Editor({ projectId }: { projectId: string }) {
 
       <section className="row-start-3 grid min-h-0 grid-cols-[minmax(0,1fr)_280px] max-[900px]:grid-cols-1">
         <div className="flex min-h-0 min-w-0 flex-col items-center justify-center overflow-hidden bg-[radial-gradient(circle,_#1b1e24_0,_#0e1013_70%)] p-3 max-[900px]:overflow-visible max-[900px]:p-2.5">
-          <div className="preview-stage relative aspect-video h-[calc(100%_-_42px)] w-auto max-w-full flex-none overflow-hidden rounded-[5px] bg-black shadow-[0_20px_60px_#0009] max-[900px]:h-auto max-[900px]:w-full">
+          <div ref={previewStageRef} className="preview-stage relative aspect-video h-[calc(100%_-_42px)] w-auto max-w-full flex-none overflow-hidden rounded-[5px] bg-black shadow-[0_20px_60px_#0009] fullscreen:h-screen fullscreen:w-screen fullscreen:max-w-none fullscreen:rounded-none max-[900px]:h-auto max-[900px]:w-full">
             <video
               ref={videoRef} src={`/api/projects/${projectId}/media`} playsInline preload="metadata" aria-label="Video preview" className="block size-full object-contain"
               style={{ filter: cssFilter(activeClip), transform: cssTransform(activeClip) }}
@@ -536,8 +599,8 @@ export function Editor({ projectId }: { projectId: string }) {
             {!!state?.music.length && <audio ref={musicRef} src={`/api/projects/${projectId}/music?asset=${state.music[0].assetId}`} preload="auto" aria-label="Background music" onTimeUpdate={(event) => { const music = state.music.find((item) => playheadMs >= item.timelineStartMs && playheadMs < musicClipEnd(state, item)); if (!music) return; if (event.currentTarget.currentTime * 1000 >= music.sourceOutMs - 15) { if (music.loop) event.currentTarget.currentTime = music.sourceInMs / 1000; else event.currentTarget.pause(); } }} />}
             <video ref={nextVideoRef} src={`/api/projects/${projectId}/media`} playsInline preload="metadata" muted={false} aria-hidden="true" className="pointer-events-none absolute inset-0 block size-full object-contain" style={{ opacity: secondaryOpacity, filter: cssFilter(nextClip), transform: cssTransform(nextClip) }} />
             <div className="pointer-events-none absolute inset-0 bg-black" style={{ opacity: blackOpacity }} />
-            {state && <PreviewTextLayer state={state} playheadMs={playheadMs} preview={textPreview} />}
-            <button className="absolute top-2.5 right-2.5 z-5 cursor-pointer rounded-md border border-[#ffffff38] bg-[#080808aa] px-2.25 py-1.5" aria-label="Capture current frame" onClick={() => { try { inspectFrame(); } catch (cause) { setError((cause as Error).message); } }} title="Capture current frame">▣</button>
+            {state && <PreviewTextLayer state={state} playheadMs={playheadMs} preview={textPreview} captionBackgroundOpacity={captionOpacityPreview} />}
+            <button className="absolute top-2.5 right-2.5 z-5 cursor-pointer rounded-md border border-[#ffffff38] bg-[#080808aa] p-2" aria-label={isFullscreen ? "Exit full screen" : "Enter full screen"} onClick={() => { const action = document.fullscreenElement ? document.exitFullscreen() : previewStageRef.current?.requestFullscreen(); void action?.catch((cause) => setError(cause instanceof Error ? cause.message : "Full screen failed")); }} title={isFullscreen ? "Exit full screen" : "Enter full screen"}>{isFullscreen ? <Minimize2 className="size-4" aria-hidden="true" /> : <Maximize2 className="size-4" aria-hidden="true" />}</button>
           </div>
           <div className="flex w-[min(100%,900px)] items-center gap-2 pt-3">
             <button className="cursor-pointer rounded-[5px] border border-[var(--line)] bg-[var(--panel-2)] px-2.25 py-1.5 text-[11px]" aria-label="Seek backward 5 seconds" onClick={() => seekTimeline(Math.max(0, playheadMs - 5000))}>−5s</button>
@@ -550,7 +613,7 @@ export function Editor({ projectId }: { projectId: string }) {
 
         <aside className="min-h-0 overflow-auto border-l border-[var(--line)] bg-[var(--panel)] max-[900px]:max-h-[330px] max-[900px]:border-t max-[900px]:border-l-0" aria-label="Clip inspector">
           <div className="sticky top-0 z-2 flex justify-between border-b border-[var(--line)] bg-[#14161b] px-[13px] py-[11px] text-[9px] tracking-[.14em] text-[#c7cad0] uppercase"><span>Inspector</span>{selectedClip && <code className="text-[var(--muted)]">{formatTime(clipDuration(selectedClip))}</code>}</div>
-          {state && selectedText && selectedTextItem ? <TextInspector state={state} kind={selectedText.kind} item={selectedTextItem} onPreview={(patch) => setTextPreview({ kind: selectedText.kind, id: selectedText.id, patch })} onCommit={() => setTextPreview(null)} dispatch={dispatch} /> : state && selectedMusic ? <MusicInspector state={state} music={selectedMusic} onPreview={(patch) => setMusicPreview({ clipId: selectedMusic.id, patch })} onCommit={() => setMusicPreview(null)} dispatch={dispatch} /> : state && selectedClip ? <ClipInspector state={state} clip={selectedClip} dispatch={dispatch} previewClip={previewClip} setError={setError} /> : <p className="p-8 text-center text-xs text-[var(--muted)]">Select a clip to adjust it.</p>}
+          {state && selectedText && selectedTextItem ? <TextInspector state={state} kind={selectedText.kind} item={selectedTextItem} onPreview={(patch) => setTextPreview({ kind: selectedText.kind, id: selectedText.id, patch })} onCommit={() => setTextPreview(null)} onCaptionOpacityPreview={setCaptionOpacityPreview} onCaptionOpacityCommit={() => setCaptionOpacityPreview(null)} dispatch={dispatch} /> : state && selectedMusic ? <MusicInspector state={state} music={selectedMusic} onPreview={(patch) => { setMusicPreview({ clipId: selectedMusic.id, patch }); if (patch.volume !== undefined && musicRef.current) setMediaGain(musicRef.current, selectedMusic.muted ? 0 : patch.volume); if (patch.speed !== undefined && musicRef.current) musicRef.current.playbackRate = patch.speed; }} onCommit={() => setMusicPreview(null)} dispatch={dispatch} /> : state && selectedClip ? <ClipInspector state={state} clip={selectedClip} dispatch={dispatch} previewClip={(clipId, patch) => { previewClip(clipId, patch); if (patch.volume !== undefined && clipId === activeClip?.id && videoRef.current) setMediaGain(videoRef.current, selectedClip.muted ? 0 : patch.volume); }} setError={setError} /> : <p className="p-8 text-center text-xs text-[var(--muted)]">Select a clip to adjust it.</p>}
         </aside>
       </section>
 
@@ -580,7 +643,7 @@ export function Editor({ projectId }: { projectId: string }) {
         <div className="min-h-0 overflow-auto" role="tabpanel">
           {tab === "transcript" && state && <TranscriptPanel state={state} transcript={transcript} playheadMs={playheadMs} dispatch={dispatch} transcribeVideo={transcribeVideo} automaticStatus={autoTranscriptionStatus} seekTimeline={seekTimeline} setError={setError} />}
           {tab === "text" && state && <TextPanel state={state} playheadMs={playheadMs} dispatch={dispatch} />}
-          {tab === "music" && state && <MusicPanel projectId={projectId} state={state} dispatch={dispatch} setError={setError} />}
+          {tab === "music" && state && <MusicPanel projectId={projectId} state={state} requested={musicUploadRequested} onRequestComplete={() => setMusicUploadRequested(false)} dispatch={dispatch} setError={setError} />}
           {tab === "silence" && state && <SilencePanel transcript={transcript} detect={detectSilences} dispatch={dispatch} setError={setError} />}
           {tab === "activity" && state && <ActivityPanel state={state} />}
         </div>
@@ -609,20 +672,20 @@ function RangeControl({ label, value, resetValue, min, max, step, suffix = "", o
   return <label className="my-2.5 block"><span className="flex items-center justify-between text-[10px] leading-none text-[#a6abb4]">{label}<span className="flex h-4 items-center gap-1"><output className="inline-flex h-4 items-center font-mono leading-none text-[#f3f3f4]">{draft}{suffix}</output><button type="button" className="inline-flex size-4 cursor-pointer items-center justify-center border-0 bg-transparent p-0 text-[#858b96] hover:text-(--lime) focus-visible:text-(--lime)" title={`Reset ${label}`} aria-label={`Reset ${label}`} onClick={(event) => { event.preventDefault(); reset(); }}><RotateCcw className="size-2.5 -translate-y-[0.5px] shrink-0" strokeWidth={2} aria-hidden="true" /></button></span></span><input className="h-0.75 w-full accent-(--lime)" type="range" min={min} max={max} step={step} value={draft} onChange={(event) => { const next = Number(event.target.value); setDraft(next); onPreview?.(next); }} onPointerUp={() => onCommit(draft)} onKeyUp={(event) => { if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"].includes(event.key)) onCommit(draft); }} /></label>;
 }
 
-function TextInspector({ state, kind, item, onPreview, onCommit, dispatch }: { state: ProjectState; kind: "caption" | "overlay"; item: TimedText; onPreview(patch: Partial<TimedText>): void; onCommit(): void; dispatch(command: CommandInput): ProjectState }) {
+function TextInspector({ state, kind, item, onPreview, onCommit, onCaptionOpacityPreview, onCaptionOpacityCommit, dispatch }: { state: ProjectState; kind: "caption" | "overlay"; item: TimedText; onPreview(patch: Partial<TimedText>): void; onCommit(): void; onCaptionOpacityPreview(value: number): void; onCaptionOpacityCommit(): void; dispatch(command: CommandInput): ProjectState }) {
   const adjust = (patch: Partial<TimedText>) => { onCommit(); return dispatch({ type: kind === "caption" ? "update_caption" : "update_overlay", actor: "human", id: item.id, patch }); };
   return <div className="px-3.5 pt-3 pb-[30px]">
     <label className="text-[9px] text-[var(--muted)] uppercase">Text<textarea key={`${item.id}-${item.text}`} className="mt-1 min-h-16 w-full resize-y rounded-[5px] border border-[var(--line)] bg-[#0c0e11] p-2 text-[11px] text-white" defaultValue={item.text} onBlur={(event) => { const text = event.target.value.trim(); if (text && text !== item.text) adjust({ text }); }} /></label>
     <div className="mt-3 grid grid-cols-2 gap-2"><label className="text-[9px] text-[var(--muted)] uppercase">Start (ms)<input key={`${item.id}-start-${item.startMs}`} className="mt-1 w-full rounded border border-[var(--line)] bg-[#0c0e11] p-1.5 text-white" type="number" min={0} max={item.endMs - 50} defaultValue={Math.round(item.startMs)} onBlur={(event) => adjust({ startMs: Number(event.target.value) })} /></label><label className="text-[9px] text-[var(--muted)] uppercase">End (ms)<input key={`${item.id}-end-${item.endMs}`} className="mt-1 w-full rounded border border-[var(--line)] bg-[#0c0e11] p-1.5 text-white" type="number" min={item.startMs + 50} max={timelineDuration(state)} defaultValue={Math.round(item.endMs)} onBlur={(event) => adjust({ endMs: Number(event.target.value) })} /></label></div>
     <label className="mt-3 grid gap-1 text-[9px] text-[var(--muted)] uppercase">Position<select className="rounded border border-[var(--line)] bg-[#0e1014] p-1.5 text-[11px] text-white" value={item.position} onChange={(event) => adjust({ position: event.target.value as TimedText["position"] })}><option value="top">Top</option><option value="center">Center</option><option value="bottom">Bottom</option></select></label>
-    {kind === "overlay" ? <><RangeControl label="Size" value={item.fontSize ?? 54} resetValue={54} min={16} max={160} step={2} onPreview={(fontSize) => onPreview({ fontSize })} onCommit={(fontSize) => adjust({ fontSize })} /><label className="mt-3 grid gap-1 text-[9px] text-[var(--muted)] uppercase">Color<select className="rounded border border-[var(--line)] bg-[#0e1014] p-1.5 text-[11px] text-white" value={item.color ?? "white"} onChange={(event) => adjust({ color: event.target.value as TimedText["color"] })}><option value="white">White</option><option value="yellow">Yellow</option><option value="lime">Lime</option></select></label><label className="mt-3 flex items-center gap-2 text-[11px] text-[#a6abb4]"><input type="checkbox" checked={item.background !== false} onChange={(event) => adjust({ background: event.target.checked })} /> Background</label></> : <><label className="mt-3 grid gap-1 text-[9px] text-[var(--muted)] uppercase">Subtitle size<select className="rounded border border-[var(--line)] bg-[#0e1014] p-1.5 text-[11px] text-white" value={state.captionStyle.size} onChange={(event) => dispatch({ type: "set_caption_style", actor: "human", patch: { size: event.target.value as typeof state.captionStyle.size } })}><option value="small">Small</option><option value="medium">Medium</option><option value="large">Large</option></select></label><label className="mt-3 flex items-center gap-2 text-[11px] text-[#a6abb4]"><input type="checkbox" checked={state.captionStyle.background} onChange={(event) => dispatch({ type: "set_caption_style", actor: "human", patch: { background: event.target.checked } })} /> Background</label></>}
+    {kind === "overlay" ? <><RangeControl label="Size" value={item.fontSize ?? 54} resetValue={54} min={16} max={160} step={2} onPreview={(fontSize) => onPreview({ fontSize })} onCommit={(fontSize) => adjust({ fontSize })} /><label className="mt-3 grid gap-1 text-[9px] text-[var(--muted)] uppercase">Color<select className="rounded border border-[var(--line)] bg-[#0e1014] p-1.5 text-[11px] text-white" value={item.color ?? "white"} onChange={(event) => adjust({ color: event.target.value as TimedText["color"] })}><option value="white">White</option><option value="yellow">Yellow</option><option value="lime">Lime</option></select></label><label className="mt-3 flex items-center gap-2 text-[11px] text-[#a6abb4]"><input type="checkbox" checked={item.background !== false} onChange={(event) => adjust({ background: event.target.checked })} /> Background</label></> : <><label className="mt-3 grid gap-1 text-[9px] text-[var(--muted)] uppercase">Subtitle size<select className="rounded border border-[var(--line)] bg-[#0e1014] p-1.5 text-[11px] text-white" value={state.captionStyle.size} onChange={(event) => dispatch({ type: "set_caption_style", actor: "human", patch: { size: event.target.value as typeof state.captionStyle.size } })}><option value="small">Small</option><option value="medium">Medium</option><option value="large">Large</option></select></label><label className="mt-3 flex items-center gap-2 text-[11px] text-[#a6abb4]"><input type="checkbox" checked={state.captionStyle.background} onChange={(event) => dispatch({ type: "set_caption_style", actor: "human", patch: { background: event.target.checked } })} /> Background</label><RangeControl label="Background opacity" value={state.captionStyle.backgroundOpacity * 100} resetValue={45} min={0} max={100} step={1} suffix="%" onPreview={(value) => onCaptionOpacityPreview(value / 100)} onCommit={(value) => { onCaptionOpacityCommit(); dispatch({ type: "set_caption_style", actor: "human", patch: { backgroundOpacity: value / 100 } }); }} /></>}
     <button className="mt-5 w-full cursor-pointer rounded border border-[#713d47] bg-transparent px-2 py-1.5 text-[10px] text-[#ff9aa9]" onClick={() => dispatch({ type: kind === "caption" ? "remove_caption" : "remove_overlay", actor: "human", id: item.id })}>Remove {kind}</button>
   </div>;
 }
 
 function MusicInspector({ state, music, onPreview, onCommit, dispatch }: { state: ProjectState; music: MusicClip; onPreview(patch: Partial<MusicClip>): void; onCommit(): void; dispatch(command: CommandInput): ProjectState }) {
-  const adjust = (patch: Partial<Pick<MusicClip, "timelineStartMs" | "sourceInMs" | "sourceOutMs" | "volume" | "muted" | "fadeInMs" | "fadeOutMs" | "loop">>) => { onCommit(); return dispatch({ type: "adjust_music", actor: "human", clipId: music.id, patch }); };
-  return <div className="px-3.5 pt-3 pb-[30px]"><b className="block overflow-hidden text-xs text-ellipsis whitespace-nowrap">{music.name}</b><small className="text-[9px] text-[var(--muted)]">{formatTime(music.durationMs)} source</small><RangeControl label="Volume" value={music.volume} resetValue={0.3} min={0} max={2} step={0.05} onPreview={(volume) => onPreview({ volume })} onCommit={(volume) => adjust({ volume })} /><RangeControl label="Fade in" value={music.fadeInMs} resetValue={0} min={0} max={Math.min(5000, (music.sourceOutMs - music.sourceInMs) / 2)} step={50} suffix="ms" onCommit={(fadeInMs) => adjust({ fadeInMs })} /><RangeControl label="Fade out" value={music.fadeOutMs} resetValue={0} min={0} max={Math.min(5000, (music.sourceOutMs - music.sourceInMs) / 2)} step={50} suffix="ms" onCommit={(fadeOutMs) => adjust({ fadeOutMs })} /><div className="grid grid-cols-3 gap-1"><label className="text-[9px] text-[var(--muted)]">Start<input className="mt-1 w-full rounded border border-[var(--line)] bg-[#0b0d10] p-1 text-white" type="number" min={0} max={timelineDuration(state) - 50} defaultValue={Math.round(music.timelineStartMs)} key={`start-${music.timelineStartMs}`} onBlur={(event) => adjust({ timelineStartMs: Number(event.target.value) })} /></label><label className="text-[9px] text-[var(--muted)]">In<input className="mt-1 w-full rounded border border-[var(--line)] bg-[#0b0d10] p-1 text-white" type="number" min={0} max={music.sourceOutMs - 50} defaultValue={Math.round(music.sourceInMs)} key={`in-${music.sourceInMs}`} onBlur={(event) => adjust({ sourceInMs: Number(event.target.value) })} /></label><label className="text-[9px] text-[var(--muted)]">Out<input className="mt-1 w-full rounded border border-[var(--line)] bg-[#0b0d10] p-1 text-white" type="number" min={music.sourceInMs + 50} max={music.durationMs} defaultValue={Math.round(music.sourceOutMs)} key={`out-${music.sourceOutMs}`} onBlur={(event) => adjust({ sourceOutMs: Number(event.target.value) })} /></label></div><div className="mt-4 flex items-center gap-3"><label className="flex items-center gap-1 text-[10px]"><input type="checkbox" checked={music.loop} onChange={(event) => adjust({ loop: event.target.checked })} /> Loop</label><label className="flex items-center gap-1 text-[10px]"><input type="checkbox" checked={music.muted} onChange={(event) => adjust({ muted: event.target.checked })} /> Mute</label></div><button className="mt-5 w-full cursor-pointer rounded border border-[#713d47] bg-transparent px-2 py-1.5 text-[10px] text-[#ff9aa9]" onClick={() => dispatch({ type: "remove_music", actor: "human", clipId: music.id })}>Remove music clip</button></div>;
+  const adjust = (patch: Partial<Pick<MusicClip, "timelineStartMs" | "sourceInMs" | "sourceOutMs" | "speed" | "volume" | "muted" | "fadeInMs" | "fadeOutMs" | "loop">>) => { onCommit(); return dispatch({ type: "adjust_music", actor: "human", clipId: music.id, patch }); };
+  return <div className="px-3.5 pt-3 pb-[30px]"><b className="block overflow-hidden text-xs text-ellipsis whitespace-nowrap">{music.name}</b><small className="text-[9px] text-[var(--muted)]">{formatTime(music.durationMs)} source</small><RangeControl label="Volume" value={music.volume} resetValue={0.3} min={0} max={5} step={0.05} onPreview={(volume) => onPreview({ volume })} onCommit={(volume) => adjust({ volume })} /><RangeControl label="Speed" value={music.speed} resetValue={1} min={0.5} max={2} step={0.05} suffix="×" onPreview={(speed) => onPreview({ speed })} onCommit={(speed) => adjust({ speed })} /><RangeControl label="Fade in" value={music.fadeInMs} resetValue={0} min={0} max={Math.min(5000, (music.sourceOutMs - music.sourceInMs) / music.speed / 2)} step={50} suffix="ms" onCommit={(fadeInMs) => adjust({ fadeInMs })} /><RangeControl label="Fade out" value={music.fadeOutMs} resetValue={0} min={0} max={Math.min(5000, (music.sourceOutMs - music.sourceInMs) / music.speed / 2)} step={50} suffix="ms" onCommit={(fadeOutMs) => adjust({ fadeOutMs })} /><div className="grid grid-cols-3 gap-1"><label className="text-[9px] text-[var(--muted)]">Start<input className="mt-1 w-full rounded border border-[var(--line)] bg-[#0b0d10] p-1 text-white" type="number" min={0} max={timelineDuration(state) - 50} defaultValue={Math.round(music.timelineStartMs)} key={`start-${music.timelineStartMs}`} onBlur={(event) => adjust({ timelineStartMs: Number(event.target.value) })} /></label><label className="text-[9px] text-[var(--muted)]">In<input className="mt-1 w-full rounded border border-[var(--line)] bg-[#0b0d10] p-1 text-white" type="number" min={0} max={music.sourceOutMs - 50} defaultValue={Math.round(music.sourceInMs)} key={`in-${music.sourceInMs}`} onBlur={(event) => adjust({ sourceInMs: Number(event.target.value) })} /></label><label className="text-[9px] text-[var(--muted)]">Out<input className="mt-1 w-full rounded border border-[var(--line)] bg-[#0b0d10] p-1 text-white" type="number" min={music.sourceInMs + 50} max={music.durationMs} defaultValue={Math.round(music.sourceOutMs)} key={`out-${music.sourceOutMs}`} onBlur={(event) => adjust({ sourceOutMs: Number(event.target.value) })} /></label></div><div className="mt-4 flex items-center gap-3"><label className="flex items-center gap-1 text-[10px]"><input type="checkbox" checked={music.loop} onChange={(event) => adjust({ loop: event.target.checked })} /> Loop</label><label className="flex items-center gap-1 text-[10px]"><input type="checkbox" checked={music.muted} onChange={(event) => adjust({ muted: event.target.checked })} /> Mute</label></div><button className="mt-5 w-full cursor-pointer rounded border border-[#713d47] bg-transparent px-2 py-1.5 text-[10px] text-[#ff9aa9]" onClick={() => dispatch({ type: "remove_music", actor: "human", clipId: music.id })}>Remove music clip</button></div>;
 }
 
 function ClipInspector({ state, clip, dispatch, previewClip, setError }: { state: ProjectState; clip: Clip; dispatch(command: CommandInput): ProjectState; previewClip(clipId: string, patch: Partial<Clip>): void; setError(message: string): void }) {
@@ -653,7 +716,7 @@ function ClipInspector({ state, clip, dispatch, previewClip, setError }: { state
       <RangeControl label="Pan Y" value={clip.positionY} resetValue={0} min={-100} max={100} step={1} suffix="%" onPreview={(positionY) => preview({ positionY })} onCommit={(positionY) => adjust({ positionY })} />
     </div>
     <h3 className="mx-[-14px] mt-[18px] mb-2.5 border-b border-[#242830] px-3.5 pb-2 text-[9px] tracking-[.12em] text-[#7f8590] uppercase">Playback</h3>
-    <RangeControl label="Volume" value={clip.volume} resetValue={1} min={0} max={2} step={0.05} onPreview={(volume) => preview({ volume })} onCommit={(volume) => adjust({ volume })} />
+    <RangeControl label="Volume" value={clip.volume} resetValue={1} min={0} max={5} step={0.05} onPreview={(volume) => preview({ volume })} onCommit={(volume) => adjust({ volume })} />
     <RangeControl label="Speed" value={clip.speed} resetValue={1} min={0.5} max={2} step={0.05} suffix="×" onPreview={(speed) => preview({ speed })} onCommit={(speed) => adjust({ speed })} />
     <label className="flex items-center gap-1.75 text-[11px] text-[#a6abb4]"><input type="checkbox" checked={clip.muted} onChange={(event) => adjust({ muted: event.target.checked })} /> Mute clip</label>
     <h3 className="mx-[-14px] mt-[18px] mb-2.5 border-b border-[#242830] px-3.5 pb-2 text-[9px] tracking-[.12em] text-[#7f8590] uppercase">Fades</h3>
@@ -683,15 +746,16 @@ function AudioWaveform({ peaks, clip, durationMs }: { peaks: number[]; clip: Cli
   return <svg className="pointer-events-none absolute inset-0 h-full w-full" viewBox={`${viewStart} 0 ${Math.max(0.001, viewEnd - viewStart)} 1`} preserveAspectRatio="none" aria-hidden="true"><path d={`M${top} L${bottom} Z`} fill={clip.muted ? "#829b9620" : "#57b7a43d"} /></svg>;
 }
 
-function MusicWaveform({ peaks, music, timelineDurationMs }: { peaks: number[]; music: Pick<MusicClip, "durationMs" | "sourceInMs" | "sourceOutMs" | "volume" | "muted" | "loop">; timelineDurationMs: number }) {
+function MusicWaveform({ peaks, music, timelineDurationMs }: { peaks: number[]; music: Pick<MusicClip, "durationMs" | "sourceInMs" | "sourceOutMs" | "speed" | "volume" | "muted" | "loop">; timelineDurationMs: number }) {
   const sourceDuration = music.sourceOutMs - music.sourceInMs;
   if (peaks.length < 2 || music.durationMs <= 0 || sourceDuration <= 0 || timelineDurationMs <= 0) return null;
-  const segments = Array.from({ length: music.loop ? Math.min(500, Math.ceil(timelineDurationMs / sourceDuration)) : 1 }, (_, index) => ({ offsetMs: index * sourceDuration, durationMs: Math.min(sourceDuration, timelineDurationMs - index * sourceDuration) }));
+  const loopDuration = sourceDuration / music.speed;
+  const segments = Array.from({ length: music.loop ? Math.min(500, Math.ceil(timelineDurationMs / loopDuration)) : 1 }, (_, index) => ({ offsetMs: index * loopDuration, durationMs: Math.min(loopDuration, timelineDurationMs - index * loopDuration) }));
   const last = peaks.length - 1;
   const amplitude = (peak: number) => Math.min(1, peak * (music.muted ? 0.08 : music.volume)) * 0.42;
   return <div className="pointer-events-none absolute inset-0" aria-hidden="true">{segments.map((segment) => {
     const viewStart = music.sourceInMs / music.durationMs * last;
-    const viewEnd = (music.sourceInMs + segment.durationMs) / music.durationMs * last;
+    const viewEnd = (music.sourceInMs + segment.durationMs * music.speed) / music.durationMs * last;
     const start = Math.max(0, Math.floor(viewStart) - 1);
     const values = peaks.slice(start, Math.min(peaks.length, Math.ceil(viewEnd) + 2));
     const top = values.map((peak, index) => `${start + index},${0.5 - amplitude(peak)}`).join(" L");
@@ -907,8 +971,8 @@ function Timeline({ state, waveform, musicWaveform, musicPreview, snapEnabled, p
       const scrollDelta = (scrollRef.current?.scrollLeft ?? 0) - startScroll;
       const delta = (point.clientX - startX + scrollDelta) / Math.max(1, trackWidth) * total;
       if (edge === "move") result.timelineStartMs = Math.max(0, Math.min(total - 50, music.timelineStartMs + delta));
-      else if (edge === "in") { const change = Math.max(-music.sourceInMs, Math.min(music.sourceOutMs - music.sourceInMs - 50, delta)); result.sourceInMs = music.sourceInMs + change; result.timelineStartMs = Math.max(0, music.timelineStartMs + change); }
-      else result.sourceOutMs = Math.min(music.durationMs, Math.max(music.sourceInMs + 50, music.sourceOutMs + delta));
+      else if (edge === "in") { const sourceChange = Math.max(-music.sourceInMs, Math.min(music.sourceOutMs - music.sourceInMs - 50, delta * music.speed)); result.sourceInMs = music.sourceInMs + sourceChange; result.timelineStartMs = Math.max(0, music.timelineStartMs + sourceChange / music.speed); }
+      else result.sourceOutMs = Math.min(music.durationMs, Math.max(music.sourceInMs + 50, music.sourceOutMs + delta * music.speed));
       setMovingMusic({ clipId: music.id, ...result });
     };
     const finish = (point: { clientX: number }) => {
@@ -963,8 +1027,14 @@ function TranscriptPanel({ state, transcript, playheadMs, dispatch, transcribeVi
   const [selection, setSelection] = useState<[number, number] | null>(null);
   const [provider, setProvider] = useState<"cloudflare" | "openai">("cloudflare");
   const [apiKey, setApiKey] = useState("");
+  const [rememberApiKey, setRememberApiKey] = useState(false);
   const [processing, setProcessing] = useState("");
   const visible = transcript.filter((word) => !query || word.word.toLowerCase().includes(query.toLowerCase()));
+
+  useEffect(() => {
+    const saved = localStorage.getItem("rough-cut.openai-api-key");
+    if (saved) { setApiKey(saved); setRememberApiKey(true); }
+  }, []);
 
   async function transcribe() {
     setError("");
@@ -977,9 +1047,7 @@ function TranscriptPanel({ state, transcript, playheadMs, dispatch, transcribeVi
     const items: Array<Omit<TimedText, "id">> = [];
     for (const entry of timelineClips(state)) {
       const words = transcript.filter((word) => word.startMs >= entry.clip.sourceInMs && word.endMs <= entry.clip.sourceOutMs);
-      for (let index = 0; index < words.length; index += 5) {
-        const group = words.slice(index, index + 5);
-        if (!group.length) continue;
+      for (const group of groupCaptionWords(words)) {
         items.push({ text: group.map((word) => word.word).join(" "), startMs: entry.startMs + (group[0].startMs - entry.clip.sourceInMs) / entry.clip.speed, endMs: entry.startMs + (group.at(-1)!.endMs - entry.clip.sourceInMs) / entry.clip.speed, position: "bottom" });
       }
     }
@@ -995,7 +1063,7 @@ function TranscriptPanel({ state, transcript, playheadMs, dispatch, transcribeVi
         <button className="cursor-pointer whitespace-nowrap rounded-md border border-[#333944] bg-[#20242b] px-2.5 py-1.75 text-[10px]" onClick={generateCaptions}>Generate captions</button>
       </> : <>
         <select className="w-auto rounded-[5px] border border-[var(--line)] bg-[#0e1014] p-1.75 text-[11px]" aria-label="Transcription provider" value={provider} onChange={(event) => setProvider(event.target.value as typeof provider)}><option value="cloudflare">Cloudflare Whisper Large v3</option><option value="openai">OpenAI whisper-1 (your key)</option></select>
-        {provider === "openai" && <input className="min-w-[180px] rounded-md border border-[var(--line)] bg-[#0b0d10] px-2.25 py-1.75 text-[11px] text-white" aria-label="Session-only OpenAI API key" type="password" autoComplete="off" placeholder="Session-only OpenAI key" value={apiKey} onChange={(event) => setApiKey(event.target.value)} />}
+        {provider === "openai" && <><input className="min-w-[180px] rounded-md border border-[var(--line)] bg-[#0b0d10] px-2.25 py-1.75 text-[11px] text-white" aria-label="OpenAI API key" type="password" autoComplete="off" placeholder="OpenAI API key" value={apiKey} onChange={(event) => { const value = event.target.value; setApiKey(value); if (rememberApiKey) { if (value) localStorage.setItem("rough-cut.openai-api-key", value); else localStorage.removeItem("rough-cut.openai-api-key"); } }} /><label className="flex items-center gap-1.5 whitespace-nowrap text-[10px] text-[var(--muted)]"><input type="checkbox" checked={rememberApiKey} onChange={(event) => { setRememberApiKey(event.target.checked); if (event.target.checked && apiKey) localStorage.setItem("rough-cut.openai-api-key", apiKey); else localStorage.removeItem("rough-cut.openai-api-key"); }} />Remember on this device</label></>}
         <button className="cursor-pointer whitespace-nowrap rounded-[7px] border-0 bg-[var(--lime)] px-[13px] py-2 text-xs font-extrabold text-[#10120d] hover:bg-[#e5ff93]" disabled={!!processing || !!automaticStatus || provider === "openai" && !apiKey} onClick={() => void transcribe()} aria-live="polite">{automaticStatus || processing || "Transcribe video"}</button>
       </>}
     </div>
@@ -1020,8 +1088,13 @@ function TextPanel({ state, playheadMs, dispatch }: { state: ProjectState; playh
   </form>;
 }
 
-function MusicPanel({ projectId, state, dispatch, setError }: { projectId: string; state: ProjectState; dispatch(command: CommandInput): ProjectState; setError(message: string): void }) {
+function MusicPanel({ projectId, state, requested, onRequestComplete, dispatch, setError }: { projectId: string; state: ProjectState; requested: boolean; onRequestComplete(): void; dispatch(command: CommandInput): ProjectState; setError(message: string): void }) {
   const [uploading, setUploading] = useState(false);
+  const chooserRef = useRef<HTMLLabelElement>(null);
+  useEffect(() => {
+    if (!requested || state.music.length) return;
+    requestAnimationFrame(() => { chooserRef.current?.scrollIntoView({ behavior: "smooth", block: "center" }); chooserRef.current?.focus({ preventScroll: true }); });
+  }, [requested, state.music.length]);
   const upload = async (file?: File) => {
     if (!file) return;
     setUploading(true); setError("");
@@ -1032,12 +1105,12 @@ function MusicPanel({ projectId, state, dispatch, setError }: { projectId: strin
       const response = await fetch(`/api/projects/${projectId}/music`, { method: "POST", body: form });
       const result = await response.json() as { id?: string; error?: string };
       if (!response.ok || !result.id) throw new Error(result.error || "Music upload failed");
-      dispatch({ type: "set_music", actor: "human", music: { assetId: result.id, name: file.name, durationMs, timelineStartMs: 0, sourceInMs: 0, sourceOutMs: durationMs, volume: 0.3, muted: false, fadeInMs: 500, fadeOutMs: 500, loop: durationMs < timelineDuration(state) } });
+      dispatch({ type: "set_music", actor: "human", music: { assetId: result.id, name: file.name, durationMs, timelineStartMs: 0, sourceInMs: 0, sourceOutMs: durationMs, speed: 1, volume: 0.3, muted: false, fadeInMs: 500, fadeOutMs: 500, loop: durationMs < timelineDuration(state) } });
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Music upload failed"); }
     finally { URL.revokeObjectURL(url); setUploading(false); }
   };
   if (state.music.length) return <p className="m-0 p-8 text-center text-xs text-[var(--muted)]">Music is imported. Select an A2 clip on the timeline to adjust it in the Inspector.</p>;
-  return <div className="grid place-items-center gap-3 p-8 text-center"><p className="m-0 text-xs text-[var(--muted)]">Import one background-music file to the A2 track.</p><label className="cursor-pointer rounded-[7px] bg-[var(--lime)] px-4 py-2 text-xs font-extrabold text-[#10120d]">{uploading ? "Uploading…" : "Choose music"}<input className="hidden" type="file" accept="audio/*" disabled={uploading} onChange={(event) => void upload(event.target.files?.[0])} /></label></div>;
+  return <div className="grid place-items-center gap-3 p-8 text-center"><p className="m-0 text-xs text-[var(--muted)]">Import one background-music file to the A2 track.</p><label ref={chooserRef} tabIndex={-1} className={`cursor-pointer rounded-[7px] bg-[var(--lime)] px-4 py-2 text-xs font-extrabold text-[#10120d] outline-none ${requested ? "animate-pulse ring-2 ring-white ring-offset-2 ring-offset-[#13161b] motion-reduce:animate-none" : ""}`}>{uploading ? "Uploading…" : "Choose music"}<input className="hidden" type="file" accept="audio/*" disabled={uploading} onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ""; if (file) { onRequestComplete(); void upload(file); } }} /></label></div>;
 }
 
 function SilencePanel({ transcript, detect, dispatch, setError }: { transcript: TranscriptWord[]; detect(threshold: number, minimum: number): Promise<Array<{ startMs: number; endMs: number }>>; dispatch(command: CommandInput): ProjectState; setError(message: string): void }) {

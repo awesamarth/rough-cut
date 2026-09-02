@@ -56,9 +56,14 @@ WebMCP tools ───┘
 
 Keep schemas narrow, validate all input, and return the new version plus a structured human-readable diff.
 
+### Start
+
+- `request_video_upload` (landing page; focuses and highlights the human-operated upload control)
+
 ### Inspect
 
 - `get_project_state`
+- `get_activity`
 - `get_transcript`
 - `search_transcript`
 - `inspect_frame`
@@ -75,7 +80,7 @@ Keep schemas narrow, validate all input, and return the new version plus a struc
 - `set_transition`
 - `set_captions` / `add_caption` / `update_caption` / `remove_caption` / `set_caption_style`
 - `add_text_overlay` / `update_text_overlay` / `remove_text_overlay`
-- `adjust_background_music` / `remove_background_music`
+- `request_background_music_upload` / `adjust_background_music` / `remove_background_music`
 - `protect_segment` / `unprotect_segment`
 - `mark_broll` / `remove_broll`
 - `undo` / `redo`
@@ -99,8 +104,8 @@ Do not infer silence from transcript gaps alone. Use FFmpeg audio silence detect
 - Native WebMCP imperative API; no wrapper until required.
 - FFmpeg in Docker locally and an on-demand Cloudflare Container when deployed.
 - Default transcription: Workers AI `@cf/openai/whisper-large-v3-turbo` with word timestamps.
-- Optional BYOK: OpenAI `whisper-1`; keys stay session-only and are never stored or logged.
-- FFmpeg creates valid audio chunks whose timestamp offsets are merged after transcription.
+- Optional BYOK: OpenAI `whisper-1`; keys are forwarded by the app Worker only to OpenAI and are never stored server-side or logged, and users may explicitly remember one in device-local browser storage.
+- FFmpeg creates valid five-minute audio chunks and reports each segment's actual timestamp offset for exact merging after transcription.
 - Native video/canvas APIs for exact-frame inspection.
 
 No speaker diarization. “Render” means FFmpeg video generation, not Render.com.
@@ -139,4 +144,4 @@ No speaker diarization. “Render” means FFmpeg video generation, not Render.c
 
 ## Current status
 
-The editor, versioned command layer, 37 direct WebMCP tools, D1/R2 persistence, automatic post-upload Workers AI transcription, local and deployed FFmpeg pipelines, authenticated media proxy, exports, tests, public Worker, and public repository are implemented. Sliders preview live; the playhead/ruler supports click-drag scrubbing; fixed S1/V2/V1/A1/A2 lanes expose editable captions, overlays, linked source waveforms, and one real background-music workflow; preview/timeline/lower panes are vertically resizable; and the timeline supports Option/Alt-wheel zoom, drag-edge auto-scroll, explicit gaps, non-ripple trims, linked movement, snapping, X/Y zoom and pan, and keyboard transport/undo. Preview and MP4 export now share a canonical 1920×1080 frame and fixed-coordinate text layout, including the same bundled font, margins, sizing, colours, backgrounds, alignment, and source letterboxing. The landing page keeps a device-local index of opened projects, project renames use the versioned command layer, and MP4 export supports a base-filename dialog plus the native save-location picker where available. Component styling is Tailwind-first, global CSS contains only tokens and base behavior, and editor controls have responsive layouts, keyboard focus indicators, accessible names, and reduced-motion behavior. The Cloudflare Container and latest web Worker are deployed; production smoke tests pass for health/FFmpeg, waveform extraction, silence detection, transcription preparation, Workers AI invocation, canonical MP4 rendering, and named downloads. Submission assets still needed: final write-up review and a sub-three-minute YouTube demo.
+The editor, versioned command layer, 40 direct WebMCP tools, D1/R2 persistence, automatic post-upload Workers AI transcription, local and deployed FFmpeg pipelines, authenticated media proxy, exports, tests, public Worker, and public repository are implemented. Sliders preview live; the playhead/ruler supports click-drag scrubbing; fixed S1/V2/V1/A1/A2 lanes expose editable captions, overlays, linked source waveforms, and one real background-music workflow; preview/timeline/lower panes are vertically resizable; and the timeline supports Option/Alt-wheel zoom, drag-edge auto-scroll, explicit gaps, non-ripple trims, linked movement, snapping, X/Y zoom and pan, and keyboard transport/undo. Preview and MP4 export now share a canonical 1920×1080 frame and fixed-coordinate text layout, including the same bundled font, margins, sizing, colours, backgrounds, alignment, and source letterboxing. The landing page keeps a device-local index of opened projects, project renames use the versioned command layer, and MP4 export supports a base-filename dialog plus the native save-location picker where available. WebMCP mutations return compact versioned field diffs instead of complete project snapshots; project state includes only the latest three activity entries, with paginated history available through `get_activity`. Generated captions break at five words, sentence punctuation, long pauses, or three seconds, and clip-speed previews/commits retime affected subtitles locally from their existing timing without retranscription. Component styling is Tailwind-first, global CSS contains only tokens and base behavior, and editor controls have responsive layouts, keyboard focus indicators, accessible names, and reduced-motion behavior. The Cloudflare Container and latest web Worker are deployed; production smoke tests pass for health/FFmpeg, waveform extraction, silence detection, transcription preparation, Workers AI invocation, canonical MP4 rendering, and named downloads. Submission assets still needed: final write-up review and a sub-three-minute YouTube demo.

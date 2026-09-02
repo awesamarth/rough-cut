@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { applyCommand, createProjectState, exportSrt, timelineDuration } from "./editor";
+import { applyCommand, createProjectState, exportSrt, groupCaptionWords, timelineDuration, type TranscriptWord } from "./editor";
 
 describe("editing commands", () => {
   test("normalizes fractional media duration to whole milliseconds", () => {
@@ -14,6 +14,24 @@ describe("editing commands", () => {
     expect(next.name).toBe("Interview cut");
     expect(next.version).toBe(1);
     expect(() => applyCommand(next, { type: "rename_project", expectedVersion: 1, actor: "human", name: "  " })).toThrow("1–120");
+  });
+
+  test("splits generated caption groups at speech pauses", () => {
+    const words = [
+      { id: "1", word: "Hey", startMs: 1000, endMs: 1200 },
+      { id: "2", word: "guys", startMs: 1250, endMs: 1500 },
+      { id: "3", word: "what's", startMs: 6000, endMs: 6250 },
+      { id: "4", word: "up?", startMs: 6300, endMs: 6500 },
+    ] satisfies TranscriptWord[];
+    expect(groupCaptionWords(words).map((group) => group.map((word) => word.word))).toEqual([["Hey", "guys"], ["what's", "up?"]]);
+  });
+
+  test("retimes subtitles locally when clip speed changes", () => {
+    let state = createProjectState("00000000-0000-4000-8000-000000000000", "Demo", 10_000);
+    state = applyCommand(state, { type: "add_caption", expectedVersion: 0, actor: "human", item: { text: "Hello", startMs: 6000, endMs: 8000, position: "bottom" } });
+    state = applyCommand(state, { type: "adjust_clip", expectedVersion: 1, actor: "human", clipId: state.clips[0].id, patch: { speed: 2 } });
+    expect(state.captions[0]).toMatchObject({ startMs: 3000, endMs: 4000 });
+    expect(timelineDuration(state)).toBe(5000);
   });
 
   test("rejects stale and protected destructive edits", () => {
@@ -47,15 +65,31 @@ describe("editing commands", () => {
     expect(next.clips[0]).toMatchObject({ scaleX: 0.25, scaleY: 4, positionX: 40, positionY: -25 });
   });
 
+  test("changes background-music speed and timeline duration", () => {
+    let state = createProjectState("00000000-0000-4000-8000-000000000000", "Demo", 5000);
+    state = applyCommand(state, { type: "set_music", expectedVersion: 0, actor: "human", music: { assetId: "10000000-0000-4000-8000-000000000000", name: "bed.mp3", durationMs: 10_000, timelineStartMs: 0, sourceInMs: 0, sourceOutMs: 10_000, speed: 1, volume: 0.3, muted: false, fadeInMs: 0, fadeOutMs: 0, loop: false } });
+    expect(timelineDuration(state)).toBe(10_000);
+    state = applyCommand(state, { type: "adjust_music", expectedVersion: 1, actor: "human", clipId: state.music[0].id, patch: { speed: 2 } });
+    expect(timelineDuration(state)).toBe(5000);
+    expect(state.music[0].speed).toBe(2);
+  });
+
+  test("applies one shared subtitle background opacity", () => {
+    const state = createProjectState("00000000-0000-4000-8000-000000000000", "Demo", 5000);
+    const next = applyCommand(state, { type: "set_caption_style", expectedVersion: 0, actor: "human", patch: { backgroundOpacity: 0.7 } });
+    expect(next.captionStyle.backgroundOpacity).toBe(0.7);
+    expect(() => applyCommand(next, { type: "set_caption_style", expectedVersion: 1, actor: "human", patch: { backgroundOpacity: 1.1 } })).toThrow("Invalid caption style");
+  });
+
   test("edits captions and one bounded background-music track", () => {
     let state = createProjectState("00000000-0000-4000-8000-000000000000", "Demo", 5000);
     state = applyCommand(state, { type: "add_caption", expectedVersion: 0, actor: "human", item: { text: "Hello", startMs: 0, endMs: 1000, position: "bottom" } });
     state = applyCommand(state, { type: "update_caption", expectedVersion: 1, actor: "human", id: state.captions[0].id, patch: { text: "Hello world", endMs: 1500 } });
-    state = applyCommand(state, { type: "set_music", expectedVersion: 2, actor: "human", music: { assetId: "10000000-0000-4000-8000-000000000000", name: "bed.mp3", durationMs: 10_000, timelineStartMs: 0, sourceInMs: 0, sourceOutMs: 10_000, volume: 0.3, muted: false, fadeInMs: 250, fadeOutMs: 250, loop: false } });
+    state = applyCommand(state, { type: "set_music", expectedVersion: 2, actor: "human", music: { assetId: "10000000-0000-4000-8000-000000000000", name: "bed.mp3", durationMs: 10_000, timelineStartMs: 0, sourceInMs: 0, sourceOutMs: 10_000, speed: 1, volume: 0.3, muted: false, fadeInMs: 250, fadeOutMs: 250, loop: false } });
     state = applyCommand(state, { type: "adjust_music", expectedVersion: 3, actor: "agent", clipId: state.music[0].id, patch: { volume: 9, timelineStartMs: 1000 } });
     expect(state.captions[0].text).toBe("Hello world");
     expect(exportSrt(state)).toContain("00:00:00,000 --> 00:00:01,500\nHello world");
-    expect(state.music[0]).toMatchObject({ name: "bed.mp3", volume: 2, timelineStartMs: 1000, loop: false });
+    expect(state.music[0]).toMatchObject({ name: "bed.mp3", volume: 5, timelineStartMs: 1000, loop: false });
     expect(timelineDuration(state)).toBe(11_000);
     state = applyCommand(state, { type: "split_text", expectedVersion: 4, actor: "human", kind: "caption", id: state.captions[0].id, timelineMs: 500 });
     state = applyCommand(state, { type: "split_music", expectedVersion: 5, actor: "human", clipId: state.music[0].id, timelineMs: 5000 });

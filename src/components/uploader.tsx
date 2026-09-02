@@ -1,17 +1,42 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { rememberProject } from "@/lib/local-projects";
 
 export function Uploader() {
   const router = useRouter();
   const inputRef = useRef<HTMLInputElement>(null);
+  const chooseButtonRef = useRef<HTMLButtonElement>(null);
   const [dragging, setDragging] = useState(false);
   const [progress, setProgress] = useState<number | null>(null);
   const [error, setError] = useState("");
+  const [uploadRequested, setUploadRequested] = useState(false);
+
+  useEffect(() => {
+    const context = document.modelContext;
+    if (!context?.registerTool) return;
+    const controller = new AbortController();
+    void context.registerTool({
+      name: "request_video_upload",
+      title: "Request source video upload",
+      description: "Focus and highlight the source-video upload control so the human can click it and choose one local video. Returns human_action_required because browser security requires a user gesture.",
+      inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      async execute() {
+        if (!inputRef.current || inputRef.current.disabled) return { status: "unavailable", message: "An upload is already in progress." };
+        setUploadRequested(true);
+        requestAnimationFrame(() => { chooseButtonRef.current?.scrollIntoView({ behavior: "smooth", block: "center" }); chooseButtonRef.current?.focus({ preventScroll: true }); });
+        return { status: "human_action_required", message: "Choose video is focused and highlighted. Ask the human to click it and select a local video; upload begins automatically after selection." };
+      },
+    }, { signal: controller.signal }).catch((cause) => {
+      if (cause instanceof DOMException && cause.name === "AbortError") return;
+      console.error("Landing WebMCP registration failed", cause);
+    });
+    return () => controller.abort();
+  }, []);
 
   async function upload(file: File) {
+    setUploadRequested(false);
     if (!file.type.startsWith("video/")) return setError("Choose a video file.");
     setError("");
     setProgress(0);
@@ -50,12 +75,12 @@ export function Uploader() {
       onDragLeave={() => setDragging(false)}
       onDrop={(event) => { event.preventDefault(); setDragging(false); const file = event.dataTransfer.files[0]; if (file) void upload(file); }}
     >
-      <input ref={inputRef} hidden type="file" accept="video/*" onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file); }} />
+      <input ref={inputRef} hidden disabled={progress !== null} type="file" accept="video/*" onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ""; if (file) { setUploadRequested(false); void upload(file); } }} />
       <div className="grid size-11 place-items-center rounded-xl bg-[#252a31] text-2xl text-[var(--lime)]" aria-hidden>↗</div>
       <h2 className="mt-2 mb-1.25 text-[19px]">{progress === null ? "Drop a video here" : progress === 100 ? "Opening editor…" : "Uploading source…"}</h2>
       <p className="mt-0 mb-[18px] text-[13px] text-[var(--muted)]">{progress === null ? "MP4, WebM, MOV and other video formats" : `${progress}% uploaded`}</p>
       {progress !== null && <div className="h-1.25 w-[min(400px,90%)] overflow-hidden rounded-[9px] bg-[#292d33]" role="progressbar" aria-label="Upload progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}><span className="block h-full bg-[var(--lime)] transition-[width] duration-250" style={{ width: `${progress}%` }} /></div>}
-      {progress === null && <button className="cursor-pointer rounded-[10px] border-0 bg-[var(--lime)] px-5 py-[13px] font-extrabold text-[#10120d] shadow-[0_8px_30px_#d9ff6324] hover:bg-[#e5ff93]" onClick={() => inputRef.current?.click()}>Choose video</button>}
+      {progress === null && <button ref={chooseButtonRef} className={`cursor-pointer rounded-[10px] border-0 bg-[var(--lime)] px-5 py-[13px] font-extrabold text-[#10120d] shadow-[0_8px_30px_#d9ff6324] hover:bg-[#e5ff93] ${uploadRequested ? "animate-pulse ring-2 ring-white ring-offset-2 ring-offset-[#121419] motion-reduce:animate-none" : ""}`} onClick={() => { setUploadRequested(false); inputRef.current?.click(); }}>Choose video</button>}
       {error && <p className="mt-4 text-[#ff9781]" role="alert">{error}</p>}
     </div>
   );

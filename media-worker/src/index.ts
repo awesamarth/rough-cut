@@ -15,8 +15,8 @@ type Clip = {
   transition: { type: "cut" | "crossfade" | "fade-black"; durationMs: number };
 };
 type TimedText = { text: string; startMs: number; endMs: number; position: "top" | "center" | "bottom"; fontSize?: number; color?: "white" | "yellow" | "lime"; background?: boolean };
-type MusicClip = { id: string; assetId: string; name: string; durationMs: number; timelineStartMs: number; sourceInMs: number; sourceOutMs: number; volume: number; muted: boolean; fadeInMs: number; fadeOutMs: number; loop: boolean };
-type ProjectState = { id: string; name: string; durationMs: number; clips: Clip[]; captions: TimedText[]; captionStyle: { size: "small" | "medium" | "large"; color: "white" | "yellow" | "lime"; background: boolean }; overlays: TimedText[]; music: MusicClip[] };
+type MusicClip = { id: string; assetId: string; name: string; durationMs: number; timelineStartMs: number; sourceInMs: number; sourceOutMs: number; speed: number; volume: number; muted: boolean; fadeInMs: number; fadeOutMs: number; loop: boolean };
+type ProjectState = { id: string; name: string; durationMs: number; clips: Clip[]; captions: TimedText[]; captionStyle: { size: "small" | "medium" | "large"; color: "white" | "yellow" | "lime"; background: boolean; backgroundOpacity: number }; overlays: TimedText[]; music: MusicClip[] };
 type Job = { id: string; kind: "export"; status: "queued" | "running" | "complete" | "failed"; error?: string; output?: string; createdAt: string };
 const jobs = new Map<string, Job>();
 const waveformCache = new Map<string, number[]>();
@@ -65,7 +65,8 @@ async function writeAss(file: string, state: ProjectState) {
   const captionSize = { small: 38, medium: 48, large: 58 }[state.captionStyle.size];
   const captionColor = { white: "&H00FFFFFF", yellow: "&H0066E0FF", lime: "&H0063FFD9" }[state.captionStyle.color];
   const borderStyle = state.captionStyle.background ? 3 : 1;
-  const background = state.captionStyle.background ? "&H90000000" : "&HFF000000";
+  const backgroundAlpha = Math.round((1 - state.captionStyle.backgroundOpacity) * 255).toString(16).padStart(2, "0").toUpperCase();
+  const background = state.captionStyle.background ? `&H${backgroundAlpha}000000` : "&HFF000000";
   const header = `[Script Info]\nScriptType: v4.00+\nPlayResX: 1920\nPlayResY: 1080\nScaledBorderAndShadow: yes\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Caption,DejaVu Sans,${captionSize},${captionColor},&H000000FF,&H00101010,${background},-1,0,0,0,100,100,0,0,${borderStyle},3,1,2,60,60,54,1\nStyle: Overlay,DejaVu Sans,54,&H00FFFFFF,&H000000FF,&H00101010,&H90000000,-1,0,0,0,100,100,0,0,3,10,0,5,60,60,60,1\nStyle: OverlayNoBG,DejaVu Sans,54,&H00FFFFFF,&H000000FF,&H00101010,&HFF000000,-1,0,0,0,100,100,0,0,1,3,1,5,60,60,60,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n`;
   const events = [...state.captions.map((item) => ({ ...item, style: "Caption" })), ...state.overlays.map((item) => ({ ...item, style: item.background === false ? "OverlayNoBG" : "Overlay" }))]
     .map((item) => {
@@ -80,11 +81,11 @@ async function writeAss(file: string, state: ProjectState) {
 function validateState(state: ProjectState) {
   if (!state || !safeProjectId(state.id) || !Array.isArray(state.clips) || !state.clips.length || state.clips.length > 200) throw new Error("Invalid project state");
   for (const clip of state.clips) {
-    if (![clip.timelineStartMs, clip.sourceInMs, clip.sourceOutMs, clip.speed, clip.scaleX, clip.scaleY, clip.positionX, clip.positionY].every(Number.isFinite) || clip.timelineStartMs < 0 || clip.sourceInMs < 0 || clip.sourceOutMs <= clip.sourceInMs || clip.sourceOutMs > state.durationMs || clip.speed < 0.5 || clip.speed > 2 || clip.scaleX < 0.25 || clip.scaleX > 4 || clip.scaleY < 0.25 || clip.scaleY > 4 || Math.abs(clip.positionX) > 100 || Math.abs(clip.positionY) > 100) throw new Error("Invalid clip");
+    if (![clip.timelineStartMs, clip.sourceInMs, clip.sourceOutMs, clip.speed, clip.scaleX, clip.scaleY, clip.positionX, clip.positionY, clip.volume].every(Number.isFinite) || clip.timelineStartMs < 0 || clip.sourceInMs < 0 || clip.sourceOutMs <= clip.sourceInMs || clip.sourceOutMs > state.durationMs || clip.speed < 0.5 || clip.speed > 2 || clip.scaleX < 0.25 || clip.scaleX > 4 || clip.scaleY < 0.25 || clip.scaleY > 4 || Math.abs(clip.positionX) > 100 || Math.abs(clip.positionY) > 100 || clip.volume < 0 || clip.volume > 5 || typeof clip.muted !== "boolean") throw new Error("Invalid clip");
   }
-  if (!state.captionStyle || !["small", "medium", "large"].includes(state.captionStyle.size) || !["white", "yellow", "lime"].includes(state.captionStyle.color) || typeof state.captionStyle.background !== "boolean") throw new Error("Invalid caption style");
+  if (!state.captionStyle || !["small", "medium", "large"].includes(state.captionStyle.size) || !["white", "yellow", "lime"].includes(state.captionStyle.color) || typeof state.captionStyle.background !== "boolean" || !Number.isFinite(state.captionStyle.backgroundOpacity) || state.captionStyle.backgroundOpacity < 0 || state.captionStyle.backgroundOpacity > 1) throw new Error("Invalid caption style");
   if (!Array.isArray(state.music)) throw new Error("Invalid music");
-  for (const music of state.music) if (!safeProjectId(music.id) || !safeProjectId(music.assetId) || ![music.durationMs, music.timelineStartMs, music.sourceInMs, music.sourceOutMs, music.volume, music.fadeInMs, music.fadeOutMs].every(Number.isFinite) || music.durationMs <= 0 || music.timelineStartMs < 0 || music.sourceInMs < 0 || music.sourceOutMs <= music.sourceInMs || music.sourceOutMs > music.durationMs || music.volume < 0 || music.volume > 2 || typeof music.muted !== "boolean" || typeof music.loop !== "boolean") throw new Error("Invalid music");
+  for (const music of state.music) if (!safeProjectId(music.id) || !safeProjectId(music.assetId) || ![music.durationMs, music.timelineStartMs, music.sourceInMs, music.sourceOutMs, music.speed, music.volume, music.fadeInMs, music.fadeOutMs].every(Number.isFinite) || music.durationMs <= 0 || music.timelineStartMs < 0 || music.sourceInMs < 0 || music.sourceOutMs <= music.sourceInMs || music.sourceOutMs > music.durationMs || music.speed < 0.5 || music.speed > 2 || music.volume < 0 || music.volume > 5 || typeof music.muted !== "boolean" || typeof music.loop !== "boolean") throw new Error("Invalid music");
 }
 
 async function exportProject(job: Job, state: ProjectState) {
@@ -120,7 +121,8 @@ async function exportProject(job: Job, state: ProjectState) {
         `trim=start=${seconds(clip.sourceInMs)}:end=${seconds(clip.sourceOutMs)}`,
         `setpts=(PTS-STARTPTS)/${clip.speed}`,
         "fps=30",
-        `eq=brightness=${clip.brightness}:contrast=${clip.contrast}:saturation=${clip.saturation}`,
+        `colorchannelmixer=rr=${1 + clip.brightness}:gg=${1 + clip.brightness}:bb=${1 + clip.brightness}`,
+        `eq=contrast=${clip.contrast}:saturation=${clip.saturation}`,
         `hue=h=${clip.hue}`,
         "scale=1920:1080:force_original_aspect_ratio=decrease",
         "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black",
@@ -154,10 +156,10 @@ async function exportProject(job: Job, state: ProjectState) {
     }
     state.music.forEach((music, index) => {
       const available = Math.max(0, totalDuration - music.timelineStartMs);
-      const duration = music.loop ? available : Math.min(available, music.sourceOutMs - music.sourceInMs);
+      const duration = music.loop ? available : Math.min(available, (music.sourceOutMs - music.sourceInMs) / music.speed);
       const musicFilters = [`atrim=start=${seconds(music.sourceInMs)}:end=${seconds(music.sourceOutMs)}`, "asetpts=PTS-STARTPTS", "aresample=48000"];
       if (music.loop) musicFilters.push(`aloop=loop=-1:size=${Math.max(1, Math.round((music.sourceOutMs - music.sourceInMs) / 1000 * 48000))}`);
-      musicFilters.push(`atrim=duration=${seconds(duration)}`, `volume=${music.muted ? 0 : music.volume}`);
+      musicFilters.push(`atempo=${music.speed}`, `atrim=duration=${seconds(duration)}`, `volume=${music.muted ? 0 : music.volume}`);
       const fadeIn = Math.min(music.fadeInMs, duration / 2);
       const fadeOut = Math.min(music.fadeOutMs, duration / 2);
       if (fadeIn > 0) musicFilters.push(`afade=t=in:st=0:d=${seconds(fadeIn)}`);
@@ -243,10 +245,15 @@ async function prepareTranscription(projectId: string) {
   await mkdir(dir, { recursive: true });
   const input = path.join(dir, "source");
   await download(projectId, input);
-  await run(["ffmpeg", "-y", "-i", input, "-vn", "-ac", "1", "-ar", "16000", "-c:a", "libmp3lame", "-b:a", "32k", "-f", "segment", "-segment_time", "300", "-reset_timestamps", "1", path.join(dir, "chunk-%03d.mp3")]);
+  const manifest = path.join(dir, "chunks.csv");
+  await run(["ffmpeg", "-y", "-i", input, "-vn", "-ac", "1", "-ar", "16000", "-c:a", "libmp3lame", "-b:a", "32k", "-f", "segment", "-segment_time", "300", "-reset_timestamps", "1", "-segment_list", manifest, "-segment_list_type", "csv", path.join(dir, "chunk-%03d.mp3")]);
   await rm(input, { force: true });
-  const chunks = (await readdir(dir)).filter((name) => name.endsWith(".mp3")).sort();
-  return { jobId, chunks: chunks.map((_, index) => ({ index, offsetMs: index * 300_000, url: `/jobs/${jobId}/chunks/${index}` })) };
+  const chunks = (await Bun.file(manifest).text()).trim().split("\n").filter(Boolean).map((line, index) => {
+    const [, start] = line.split(",");
+    return { index, offsetMs: Math.round(Number(start) * 1000), url: `/jobs/${jobId}/chunks/${index}` };
+  });
+  await rm(manifest, { force: true });
+  return { jobId, chunks };
 }
 
 await mkdir(DATA_DIR, { recursive: true });

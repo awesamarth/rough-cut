@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { applyCommand, createProjectState, type EditorCommand, type ProjectState, type TranscriptWord } from "@/lib/editor";
+import { applyCommand, createProjectState, retimeCaptionsForSpeed, type EditorCommand, type ProjectState, type TranscriptWord } from "@/lib/editor";
 import { rememberProject } from "@/lib/local-projects";
 
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
@@ -68,7 +68,11 @@ export function useEditor(projectId: string) {
   }, [load, projectId]);
 
   const previewClip = useCallback((clipId: string, patch: Partial<ProjectState["clips"][number]>) => {
-    setState((current) => current ? { ...current, clips: current.clips.map((clip) => clip.id === clipId ? { ...clip, ...patch } : clip) } : current);
+    setState((current) => {
+      if (!current) return current;
+      const clip = current.clips.find((item) => item.id === clipId);
+      return { ...current, clips: current.clips.map((item) => item.id === clipId ? { ...item, ...patch } : item), captions: clip && patch.speed !== undefined ? retimeCaptionsForSpeed(current.captions, clip, patch.speed) : current.captions };
+    });
   }, []);
 
   const dispatch = useCallback((input: CommandInput) => {
