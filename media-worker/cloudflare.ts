@@ -7,7 +7,7 @@ interface Env {
 
 export class MediaContainer extends Container {
   defaultPort = 8788;
-  sleepAfter = "20m";
+  sleepAfter = "10m";
   envVars = {
     PORT: "8788",
     DATA_DIR: "/tmp/jobs",

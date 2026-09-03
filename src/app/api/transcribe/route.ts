@@ -1,5 +1,5 @@
 import { cloudflare, jsonError } from "@/lib/server";
-import type { TranscriptWord } from "@/lib/editor";
+import { sanitizeTranscript, type TranscriptWord } from "@/lib/editor";
 
 export const dynamic = "force-dynamic";
 
@@ -10,13 +10,13 @@ function normalize(result: WhisperResult): { text: string; words: TranscriptWord
   const rawWords = result.words ?? result.segments?.flatMap((segment) => segment.words ?? []) ?? [];
   return {
     text: result.text ?? rawWords.map((word) => word.word).join(" "),
-    words: rawWords.filter((word) => word.word && Number.isFinite(word.start) && Number.isFinite(word.end)).map((word) => ({
+    words: sanitizeTranscript(rawWords.filter((word) => word.word && Number.isFinite(word.start) && Number.isFinite(word.end)).map((word) => ({
       id: crypto.randomUUID(),
-      word: word.word!.trim(),
-      startMs: Math.round(word.start! * 1000),
-      endMs: Math.round(word.end! * 1000),
+      word: word.word!,
+      startMs: word.start! * 1000,
+      endMs: word.end! * 1000,
       confidence: word.confidence ?? word.probability,
-    })),
+    }))),
   };
 }
 

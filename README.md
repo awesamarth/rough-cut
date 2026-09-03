@@ -1,104 +1,137 @@
 # ROUGH//CUT
 
-A human-first, WebMCP-native video editor. Humans edit through the timeline and transcript; compatible browser agents call the same versioned editing commands through `document.modelContext.registerTool`.
+![ROUGH//CUT: You + your AI agent. One timeline.](submission-thumbnail.png)
 
-**Live app:** https://rough-cut.samarthsaxena1672003.workers.dev  
-**Source:** https://github.com/awesamarth/rough-cut
+**A human-first video editor built for working with AI, not handing the edit over to it.**
 
-## What works
+[Try ROUGH//CUT](https://rough-cut.samarthsaxena1672003.workers.dev) · [View the source](https://github.com/awesamarth/rough-cut)
 
-- Chunked video uploads to R2 and durable project revisions in D1
-- Non-destructive split, non-ripple trim, delete, reorder, explicit gaps, protected ranges, undo and redo
-- Brightness, contrast, saturation, hue, independent X/Y zoom and pan, volume, mute and speed controls
-- Crossfades, fade-through-black, edge fades, editable styled captions and text overlays
-- Fixed S1/V2/V1/A1/A2 lanes with linked source audio and one background-music track
-- B-roll markers and exact-frame inspection
-- FFmpeg silence detection with configurable speech padding
-- Automatic post-upload Cloudflare Whisper Large v3 Turbo transcription with word timestamps
-- Optional OpenAI `whisper-1` key, with explicit device-local remembering and no server-side key storage
-- Canonical 1920×1080 browser preview and FFmpeg MP4 output with fixed-layout text parity, plus CMX3600-style EDL export
-- 39 direct WebMCP tools with optimistic version checks
-- Responsive, keyboard-accessible editor UI styled with Tailwind utilities
-- Editor shortcuts: Space play/pause, Backspace lift-delete, Delete ripple-delete, and Cmd/Ctrl+Z undo
+## Why I built it
 
-No built-in chat or agent is included. Open the app inside a WebMCP-compatible agent browser.
+Most AI video editors take too much control away from the person making the video. They generate an edit behind the scenes, then give you a result that is difficult to inspect or change precisely.
 
-## Local development
+I have been editing videos for over five years, and that approach never felt right to me. There are plenty of repetitive editing tasks that should be automated, but the human behind the production should still have complete creative control.
 
-Requirements: Bun, Docker Desktop, Wrangler authentication, and a browser-playable source video (H.264/AAC MP4 works best).
+WebMCP made a different model possible: an external AI agent can enter the same editor as the human, use the same tools, and work on the same timeline.
+
+## What it does
+
+ROUGH//CUT is an in-browser video editor that you and any WebMCP-compatible AI agent can use together.
+
+Upload a real interview, podcast, tutorial, or product demo. ROUGH//CUT transcribes it with word-level timestamps and gives you a synchronized video preview, transcript, inspector, and multi-lane timeline. You can edit manually, ask an agent to handle repetitive work, or move between the two at any point.
+
+Both you and the agent operate the same project through the same editing commands. Agent actions appear immediately in the editor, are recorded in the activity feed, and remain undoable.
+
+## What you can do
+
+- Split, trim, delete, ripple-delete, and reorder clips
+- Edit directly from the transcript
+- Detect and review silence before removing it
+- Protect important ranges from destructive edits
+- Adjust brightness, contrast, saturation, hue, volume, speed, zoom, and position
+- Add cuts, crossfades, fade-to-black transitions, and edge fades
+- Generate, style, edit, and resync captions from the saved transcript
+- Add text overlays and B-roll markers
+- Upload and edit background music with gain, speed, trims, fades, and looping
+- Scrub, zoom, pan, snap, and edit with familiar keyboard shortcuts
+- Export a real 1080p H.264 MP4, CMX3600-style EDL, or SRT file
+
+The original video and music are never modified. Every edit is non-destructive and stored as part of a versioned project.
+
+## Human and agent, one timeline
+
+ROUGH//CUT does not include a built-in chatbot or a proprietary agent. Instead, it exposes 40 focused tools directly through the native WebMCP API.
+
+```text
+Human controls ─┐
+                ├─ editing commands → versioned project → preview and export
+WebMCP agent ───┘
+```
+
+This shared command layer is the core of the project:
+
+- The agent never works inside a hidden copy of the edit.
+- Human and agent changes use the same validation, persistence, and undo history.
+- Every mutation requires the current project version.
+- If you edit while an agent is working, stale agent actions are rejected instead of overwriting your work.
+- Uploads and downloads remain visible human handoffs because the browser requires user approval for local files.
+
+A prompt like this can produce a complete, inspectable first pass:
+
+> Make this energetic, preserve the technical explanation, add subtle fades and captions, and mark B-roll opportunities.
+
+You can then review every change, adjust clips manually, undo anything you dislike, and ask the agent to continue from the new version.
+
+## Real media, not a mocked demo
+
+ROUGH//CUT handles real uploads, transcription, persistence, waveforms, silence detection, timeline playback, and exports.
+
+Transcription uses Whisper Large V3 Turbo through Cloudflare Workers AI, with optional support for OpenAI `whisper-1`. Transcript words keep stable IDs and source timestamps, allowing generated captions to follow cuts, trims, reordering, ripple edits, and speed changes without running transcription again.
+
+FFmpeg handles waveform generation, silence detection, audio processing, and final rendering inside an on-demand Cloudflare Container. The browser preview and FFmpeg renderer share the same timeline calculations and canonical 1920×1080 coordinate system so the exported video matches the edit shown in the browser.
+
+## Built with
+
+- Next.js, React, TypeScript, and Tailwind CSS
+- Native `document.modelContext.registerTool` WebMCP integration
+- Cloudflare Workers, D1, R2, Workers AI, and Containers
+- FFmpeg for media analysis and final rendering
+- OpenAI Whisper as an optional bring-your-own-key transcription provider
+
+OpenAI keys are session-only by default. They are remembered in device-local storage only when the user explicitly asks for it, and are never stored by the server.
+
+## Try it
+
+1. Open the [live app](https://rough-cut.samarthsaxena1672003.workers.dev) in a WebMCP-compatible browser.
+2. Upload a browser-playable video. H.264/AAC MP4 works best.
+3. Edit manually, or connect an external WebMCP agent and ask it to inspect the project.
+4. Review the visible changes in the timeline and activity feed.
+5. Export the finished video, EDL, or captions.
+
+For WebMCP testing in Chrome, enable `chrome://flags/#enable-webmcp-testing` if your browser requires it.
+
+## Build and run locally
+
+### Requirements
+
+- [Bun](https://bun.sh/)
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/)
+- [Wrangler](https://developers.cloudflare.com/workers/wrangler/) authentication
+
+### Setup
 
 ```bash
+git clone https://github.com/awesamarth/rough-cut.git
+cd rough-cut
 bun install
 cp .env.example .dev.vars
+bunx wrangler login
 bun run db:migrate:local
 docker compose up --build -d
 bun run dev
 ```
 
-Open http://localhost:3000. The local media service runs at http://localhost:8788.
+Open [http://localhost:3000](http://localhost:3000). The local FFmpeg media service runs at [http://localhost:8788](http://localhost:8788).
 
-Useful checks:
+The default local configuration uses `local-dev` as the shared media-service token and accesses Workers AI remotely through your authenticated Cloudflare account.
+
+### Useful commands
 
 ```bash
-bun run typecheck
-bun test
-curl http://localhost:8788/health
+bun test                 # Run the test suite
+bun run typecheck        # Check TypeScript
+bun run lint             # Run ESLint
+bun run build            # Create a production Next.js build
+curl localhost:8788/health
 docker compose logs -f media
 ```
 
-## Cloudflare
-
-The app uses:
-
-- Worker: `rough-cut`
-- D1: `rough-cut-db`
-- R2 media: `rough-cut-media`
-- R2 Next cache: `rough-cut-next-opennext-cache`
-- Workers AI: `@cf/openai/whisper-large-v3-turbo`
-
-For a new Cloudflare account, create those resources, replace the D1 ID and worker URLs in the Wrangler configs, then run:
+Stop the local media service with:
 
 ```bash
-bunx wrangler login
-bun run db:migrate:remote
-
-TOKEN=$(openssl rand -hex 32)
-printf '%s' "$TOKEN" | bunx wrangler secret put MEDIA_WORKER_TOKEN --config media-worker/wrangler.jsonc
-printf '%s' "$TOKEN" | bunx wrangler secret put MEDIA_WORKER_TOKEN --config wrangler.jsonc
-
-bun run media:deploy
-bun run deploy
+docker compose down
 ```
-
-Production media processing runs in an on-demand Cloudflare Container on Workers Paid. The browser talks only to the Next.js `/api/media/*` proxy; the separate media Worker rejects requests without the shared secret.
-
-## Media architecture
-
-Uploaded originals remain immutable. Every edit is stored as source timestamps and parameters. Browser preview and FFmpeg share a canonical 1920×1080 frame, source letterboxing, and fixed-coordinate text layout using the same bundled font and styling.
-
-```text
-Browser UI ─┐
-WebMCP tools ├─ editing commands → D1 revisions
-             └─ authenticated API proxy → FFmpeg Container → MP4
-                                          └→ audio chunks → Workers AI transcript
-```
-
-## WebMCP tools
-
-Open an editor project in ChatGPT's in-app browser or enable `chrome://flags/#enable-webmcp-testing`. Tools register directly through `document.modelContext.registerTool`; no agent SDK or built-in chat is used.
-
-- Inspect: `get_project_state`, `get_activity`, `get_transcript`, `search_transcript`, `inspect_frame`, `detect_silences`
-- Process: `transcribe_video`
-- Start: `request_video_upload` (focuses and highlights the human-operated upload control)
-- Project: `rename_project`
-- Timeline: `split_clip`, `split_text`, `split_background_music`, `trim_clip`, `delete_clip`, `remove_segments`, `reorder_clips`, `move_clip`, `adjust_clip`, `set_transition`
-- Text and markers: `set_captions`, `add_caption`, `update_caption`, `remove_caption`, `set_caption_style`, `add_text_overlay`, `update_text_overlay`, `remove_text_overlay`, `protect_segment`, `unprotect_segment`, `mark_broll`, `remove_broll`
-- Music: `request_background_music_upload`, `adjust_background_music`, `remove_background_music`
-- History: `undo`, `redo`
-- Output: `export_mp4`, `export_edl`, `export_srt`
-
-Every mutation requires the version returned by `get_project_state`. A stale agent receives `STALE_VERSION:<current>` and must reread before retrying. Human and agent actions call the same command layer, increment the same version, remain undoable, and appear in the activity panel.
 
 ## License
 
-MIT
+ROUGH//CUT is open source under the [MIT License](LICENSE).

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, type RefObject } from "react";
-import type { ProjectState, TranscriptWord } from "@/lib/editor";
+import { captionsFromTranscript, type ProjectState, type TranscriptWord } from "@/lib/editor";
 import type { CommandInput } from "./use-editor";
 
 type Handlers = {
@@ -181,12 +181,17 @@ export function useWebMCP(handlers: Handlers) {
         async execute(input) { assertVersion(input); if (!Array.isArray(input.captions)) throw new Error("captions must be an array"); const items = input.captions.map((item) => { const value = item as Record<string, unknown>; const position: "top" | "center" | "bottom" = value.position === "top" || value.position === "center" ? value.position : "bottom"; return { text: asString(value.text, "text"), startMs: asNumber(value.start_ms, "start_ms"), endMs: asNumber(value.end_ms, "end_ms"), position }; }); return mutate({ type: "set_captions", actor: "agent", items }); },
       },
       {
+        name: "resync_captions", description: "Rebuild captions from the saved word-timestamped transcript and current clip layout without running transcription again. This replaces current captions.",
+        inputSchema: mutationSchema({}),
+        async execute(input) { assertVersion(input); const words = current.current.transcriptRef.current; if (!words.length) throw new Error("Transcript is empty; transcribe the video first"); return mutate({ type: "set_captions", actor: "agent", items: captionsFromTranscript(state(), words) }); },
+      },
+      {
         name: "add_caption", description: "Add one positioned caption without replacing existing captions.",
         inputSchema: mutationSchema({ text: string("Caption text"), start_ms: number("Timeline start"), end_ms: number("Timeline end"), position: { type: "string", enum: ["top", "center", "bottom"] } }, ["text", "start_ms", "end_ms"]),
         async execute(input) { assertVersion(input); const position = input.position === "top" || input.position === "center" ? input.position : "bottom"; return mutate({ type: "add_caption", actor: "agent", item: { text: asString(input.text, "text"), startMs: asNumber(input.start_ms, "start_ms"), endMs: asNumber(input.end_ms, "end_ms"), position } }); },
       },
       {
-        name: "update_caption", description: "Edit an existing caption's text, timing or position.",
+        name: "update_caption", description: "Edit an existing caption's text, timing or position. Text corrections to generated captions also update their linked transcript words.",
         inputSchema: mutationSchema({ caption_id: string("Caption ID"), text: { type: "string" }, start_ms: number("Timeline start"), end_ms: number("Timeline end"), position: { type: "string", enum: ["top", "center", "bottom"] } }, ["caption_id"]),
         async execute(input) { assertVersion(input); const patch: Record<string, unknown> = {}; if (input.text !== undefined) patch.text = asString(input.text, "text"); if (input.start_ms !== undefined) patch.startMs = asNumber(input.start_ms, "start_ms"); if (input.end_ms !== undefined) patch.endMs = asNumber(input.end_ms, "end_ms"); if (input.position !== undefined) { if (input.position !== "top" && input.position !== "center" && input.position !== "bottom") throw new Error("Invalid position"); patch.position = input.position; } return mutate({ type: "update_caption", actor: "agent", id: asString(input.caption_id, "caption_id"), patch }); },
       },

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { applyCommand, createProjectState, retimeCaptionsForSpeed, type EditorCommand, type ProjectState, type TranscriptWord } from "@/lib/editor";
+import { applyCommand, correctTranscriptWords, createProjectState, partitionCaptionWords, reconcileAnchoredCaptions, retimeCaptionsForSpeed, sanitizeTranscript, type EditorCommand, type ProjectState, type TranscriptWord } from "@/lib/editor";
 import { rememberProject } from "@/lib/local-projects";
 
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
@@ -10,6 +10,8 @@ export type ProjectPayload = {
   id: string; name: string; status: string; version: number; sourceName: string; sourceType: string; sourceSize: number;
   state: ProjectState | null; transcript: TranscriptWord[]; updatedAt: string; error?: string;
 };
+
+type HistoryEntry = { state: ProjectState; transcript: TranscriptWord[] };
 
 export function useEditor(projectId: string) {
   const [project, setProject] = useState<ProjectPayload | null>(null);
@@ -20,8 +22,8 @@ export function useEditor(projectId: string) {
   const [lastSavedAt, setLastSavedAt] = useState<number | null>(null);
   const stateRef = useRef<ProjectState | null>(null);
   const transcriptRef = useRef<TranscriptWord[]>([]);
-  const past = useRef<ProjectState[]>([]);
-  const future = useRef<ProjectState[]>([]);
+  const past = useRef<HistoryEntry[]>([]);
+  const future = useRef<HistoryEntry[]>([]);
   const saveChain = useRef(Promise.resolve());
   const pending = useRef(0);
 
@@ -79,12 +81,33 @@ export function useEditor(projectId: string) {
     const current = stateRef.current;
     if (!current) throw new Error("Project is not ready");
     const command = { ...input, expectedVersion: current.version } as EditorCommand;
+    const previousTranscript = transcriptRef.current;
+    const captionToSplit = input.type === "split_text" && input.kind === "caption" ? current.captions.find((caption) => caption.id === input.id) : undefined;
+    const captionSplit = captionToSplit?.sourceWordIds?.length ? partitionCaptionWords(current, previousTranscript, captionToSplit, input.type === "split_text" ? input.timelineMs : 0) : null;
     const next = applyCommand(current, command);
-    past.current.push(current);
+    if (captionSplit && captionToSplit) {
+      const index = next.captions.findIndex((caption) => caption.id === captionToSplit.id);
+      Object.assign(next.captions[index], captionSplit.left);
+      Object.assign(next.captions[index + 1], captionSplit.right);
+    }
+    let nextTranscript: TranscriptWord[] | undefined;
+    if (input.type === "update_caption") {
+      const caption = current.captions.find((item) => item.id === input.id);
+      const updated = next.captions.find((item) => item.id === input.id);
+      const correction = input.patch.text !== undefined && caption?.sourceWordIds?.length ? correctTranscriptWords(previousTranscript, caption.sourceWordIds, input.patch.text) : null;
+      if (correction) {
+        nextTranscript = correction.words;
+        if (updated) updated.sourceWordIds = [correction.anchorId];
+      }
+    }
+    const transformsCaptions = input.type === "remove_segments" || input.type === "delete_clip" || input.type === "trim_clip" || input.type === "reorder_clips" || input.type === "move_clip" || input.type === "set_transition" || input.type === "adjust_clip" && input.patch.speed !== undefined;
+    if (transformsCaptions && previousTranscript.length && current.captions.some((caption) => caption.sourceWordIds?.length)) next.captions = reconcileAnchoredCaptions(current, next, previousTranscript);
+    past.current.push({ state: current, transcript: structuredClone(previousTranscript) });
     future.current = [];
+    if (nextTranscript) { transcriptRef.current = nextTranscript; setTranscriptState(nextTranscript); }
     install(next);
     setError("");
-    persist(current.version, next, next.activity[0]?.summary ?? input.type, input.actor);
+    persist(current.version, next, next.activity[0]?.summary ?? input.type, input.actor, nextTranscript);
     return next;
   }, [install, persist]);
 
@@ -100,13 +123,15 @@ export function useEditor(projectId: string) {
     const current = stateRef.current;
     const previous = past.current.pop();
     if (!current || !previous) return null;
-    future.current.push(current);
+    future.current.push({ state: current, transcript: structuredClone(transcriptRef.current) });
     const next: ProjectState = {
-      ...structuredClone(previous), version: current.version + 1,
+      ...structuredClone(previous.state), version: current.version + 1,
       activity: [{ id: crypto.randomUUID(), at: new Date().toISOString(), actor, summary: "undo" }, ...current.activity].slice(0, 100),
     };
+    transcriptRef.current = previous.transcript;
+    setTranscriptState(previous.transcript);
     install(next);
-    persist(current.version, next, "Undo", actor);
+    persist(current.version, next, "Undo", actor, previous.transcript);
     return next;
   }, [install, persist]);
 
@@ -114,19 +139,24 @@ export function useEditor(projectId: string) {
     const current = stateRef.current;
     const following = future.current.pop();
     if (!current || !following) return null;
-    past.current.push(current);
+    past.current.push({ state: current, transcript: structuredClone(transcriptRef.current) });
     const next: ProjectState = {
-      ...structuredClone(following), version: current.version + 1,
+      ...structuredClone(following.state), version: current.version + 1,
       activity: [{ id: crypto.randomUUID(), at: new Date().toISOString(), actor, summary: "redo" }, ...current.activity].slice(0, 100),
     };
+    transcriptRef.current = following.transcript;
+    setTranscriptState(following.transcript);
     install(next);
-    persist(current.version, next, "Redo", actor);
+    persist(current.version, next, "Redo", actor, following.transcript);
     return next;
   }, [install, persist]);
 
   const saveTranscript = useCallback((words: TranscriptWord[], actor: "human" | "agent" | "system" = "system") => {
     const current = stateRef.current;
     if (!current) throw new Error("Project is not ready");
+    words = sanitizeTranscript(words);
+    past.current.push({ state: current, transcript: structuredClone(transcriptRef.current) });
+    future.current = [];
     const next: ProjectState = {
       ...current, version: current.version + 1,
       activity: [{ id: crypto.randomUUID(), at: new Date().toISOString(), actor, summary: "transcribed video" }, ...current.activity].slice(0, 100),

@@ -1,7 +1,38 @@
 import { describe, expect, test } from "bun:test";
-import { applyCommand, createProjectState, exportSrt, groupCaptionWords, timelineDuration, type TranscriptWord } from "./editor";
+import { applyCommand, captionsFromTranscript, correctTranscriptWords, createProjectState, excludeTranscriptFromSilences, exportSrt, groupCaptionWords, partitionCaptionWords, reconcileAnchoredCaptions, sanitizeTranscript, timelineDuration, type TranscriptWord } from "./editor";
 
 describe("editing commands", () => {
+  test("corrects an anchored transcript span without fuzzy text matching", () => {
+    expect(correctTranscriptWords([
+      { id: "rough", word: "Ruff", startMs: 1000, endMs: 1200 },
+      { id: "cut", word: "Cut", startMs: 1250, endMs: 1450 },
+      { id: "other", word: "works", startMs: 1500, endMs: 1800 },
+    ], ["rough", "cut"], "ROUGH//CUT")).toEqual({
+      anchorId: "rough",
+      words: [
+        { id: "rough", word: "ROUGH//CUT", startMs: 1000, endMs: 1450 },
+        { id: "other", word: "works", startMs: 1500, endMs: 1800 },
+      ],
+    });
+  });
+
+  test("splits silence candidates around transcript words instead of dropping the whole range", () => {
+    expect(excludeTranscriptFromSilences(
+      [{ startMs: 0, endMs: 30_000 }],
+      [{ id: "word", word: "hello", startMs: 10_000, endMs: 11_000 }],
+      200,
+      500,
+    )).toEqual([{ startMs: 0, endMs: 9800 }, { startMs: 11_200, endMs: 30_000 }]);
+  });
+
+  test("drops malformed Whisper words before persistence", () => {
+    expect(sanitizeTranscript([
+      { id: "valid", word: " hello ", startMs: 100.2, endMs: 300.4 },
+      { id: "zero", word: "bad", startMs: 500.1, endMs: 500.4 },
+      { id: "empty", word: " ", startMs: 600, endMs: 700 },
+    ])).toEqual([{ id: "valid", word: "hello", startMs: 100, endMs: 300 }]);
+  });
+
   test("normalizes fractional media duration to whole milliseconds", () => {
     const state = createProjectState("00000000-0000-4000-8000-000000000000", "Short", 5866.667);
     expect(state.durationMs).toBe(5867);
@@ -41,22 +72,84 @@ describe("editing commands", () => {
     expect(() => applyCommand(state, { type: "remove_segments", expectedVersion: 1, actor: "agent", ranges: [{ startMs: 4000, endMs: 4500 }] })).toThrow("Protected range");
   });
 
-  test("removes a source range non-destructively", () => {
+  test("ripple-removes source ranges and retimes captions", () => {
     const state = createProjectState("00000000-0000-4000-8000-000000000000", "Demo", 10_000);
+    state.captions = [
+      { id: "before", text: "Before", startMs: 1000, endMs: 2000, position: "bottom" },
+      { id: "removed", text: "Silence", startMs: 4500, endMs: 5500, position: "bottom" },
+      { id: "after", text: "After", startMs: 7000, endMs: 8000, position: "bottom" },
+    ];
     const next = applyCommand(state, { type: "remove_segments", expectedVersion: 0, actor: "human", ranges: [{ startMs: 4000, endMs: 6000 }] });
-    expect(next.clips.map((clip) => [clip.timelineStartMs, clip.sourceInMs, clip.sourceOutMs])).toEqual([[0, 0, 4000], [6000, 6000, 10_000]]);
-    expect(timelineDuration(next)).toBe(10_000);
+    expect(next.clips.map((clip) => [clip.timelineStartMs, clip.sourceInMs, clip.sourceOutMs])).toEqual([[0, 0, 4000], [4000, 6000, 10_000]]);
+    expect(next.captions.map((caption) => [caption.id, caption.startMs, caption.endMs])).toEqual([["before", 1000, 2000], ["after", 5000, 6000]]);
+    expect(timelineDuration(next)).toBe(8000);
     expect(next.version).toBe(1);
+  });
+
+  test("resyncs repeated transcript text by source occurrence", () => {
+    const state = createProjectState("00000000-0000-4000-8000-000000000000", "Demo", 10_000);
+    const cut = applyCommand(state, { type: "remove_segments", expectedVersion: 0, actor: "human", ranges: [{ startMs: 0, endMs: 6000 }] });
+    const captions = captionsFromTranscript(cut, [
+      { id: "first", word: "hey", startMs: 1000, endMs: 1200 },
+      { id: "clean", word: "hey", startMs: 7000, endMs: 7200 },
+    ]);
+    expect(captions).toEqual([{ text: "hey", startMs: 1000, endMs: 1200, position: "bottom", sourceWordIds: ["clean"] }]);
   });
 
   test("supports lift and ripple-delete semantics", () => {
     let state = createProjectState("00000000-0000-4000-8000-000000000000", "Demo", 5000);
+    state.captions = [{ id: "later", text: "Later", startMs: 2000, endMs: 3000, position: "bottom" }];
     state = applyCommand(state, { type: "split_clip", expectedVersion: 0, actor: "human", clipId: state.clips[0].id, sourceMs: 1000 });
     const firstId = state.clips[0].id;
     const lifted = applyCommand(state, { type: "delete_clip", expectedVersion: 1, actor: "human", clipId: firstId });
     const rippled = applyCommand(state, { type: "delete_clip", expectedVersion: 1, actor: "human", clipId: firstId, ripple: true });
     expect(lifted.clips[0].timelineStartMs).toBe(1000);
+    expect(lifted.captions[0].startMs).toBe(2000);
     expect(rippled.clips[0].timelineStartMs).toBe(0);
+    expect(rippled.captions[0].startMs).toBe(1000);
+  });
+
+  test("transforms existing anchored captions without regenerating duplicates", () => {
+    const transcript = [
+      { id: "a", word: "one", startMs: 500, endMs: 900 },
+      { id: "b", word: "two", startMs: 1500, endMs: 1900 },
+      { id: "c", word: "three", startMs: 5500, endMs: 5900 },
+      { id: "d", word: "four", startMs: 6500, endMs: 6900 },
+    ] satisfies TranscriptWord[];
+    let state = createProjectState("00000000-0000-4000-8000-000000000000", "Demo", 10_000);
+    state.captions = captionsFromTranscript(state, transcript).map((caption, index) => ({ ...caption, id: `caption-${index}` }));
+    state = applyCommand(state, { type: "split_clip", expectedVersion: 0, actor: "human", clipId: state.clips[0].id, sourceMs: 5000 });
+    const beforeDelete = state;
+    const lifted = applyCommand(beforeDelete, { type: "delete_clip", expectedVersion: 1, actor: "human", clipId: beforeDelete.clips[0].id });
+    lifted.captions = reconcileAnchoredCaptions(beforeDelete, lifted, transcript);
+    const rippled = applyCommand(beforeDelete, { type: "delete_clip", expectedVersion: 1, actor: "human", clipId: beforeDelete.clips[0].id, ripple: true });
+    rippled.captions = reconcileAnchoredCaptions(beforeDelete, rippled, transcript);
+    expect(lifted.captions.flatMap((caption) => caption.sourceWordIds ?? [])).toEqual(["c", "d"]);
+    expect(lifted.captions[0]).toMatchObject({ startMs: 5500, endMs: 6900 });
+    expect(rippled.captions.flatMap((caption) => caption.sourceWordIds ?? [])).toEqual(["c", "d"]);
+    expect(rippled.captions[0]).toMatchObject({ startMs: 500, endMs: 1900 });
+  });
+
+  test("preserves anchored caption timing offsets through speed changes", () => {
+    const transcript = [{ id: "word", word: "hello", startMs: 1000, endMs: 2000 }] satisfies TranscriptWord[];
+    const state = createProjectState("00000000-0000-4000-8000-000000000000", "Demo", 5000);
+    state.captions = [{ id: "caption", text: "hello", startMs: 900, endMs: 2100, position: "bottom", sourceWordIds: ["word"] }];
+    const faster = applyCommand(state, { type: "adjust_clip", expectedVersion: 0, actor: "human", clipId: state.clips[0].id, patch: { speed: 2 } });
+    faster.captions = reconcileAnchoredCaptions(state, faster, transcript);
+    expect(faster.captions[0]).toMatchObject({ startMs: 450, endMs: 1050, sourceWordIds: ["word"] });
+  });
+
+  test("partitions transcript anchors when splitting a generated caption", () => {
+    const transcript = [
+      { id: "left", word: "hello", startMs: 1000, endMs: 1400 },
+      { id: "right", word: "world", startMs: 1600, endMs: 2000 },
+    ] satisfies TranscriptWord[];
+    const state = createProjectState("00000000-0000-4000-8000-000000000000", "Demo", 5000);
+    const caption = { id: "caption", text: "hello world", startMs: 1000, endMs: 2000, position: "bottom" as const, sourceWordIds: ["left", "right"] };
+    expect(partitionCaptionWords(state, transcript, caption, 1500)).toEqual({
+      left: { sourceWordIds: ["left"], text: "hello" },
+      right: { sourceWordIds: ["right"], text: "world" },
+    });
   });
 
   test("normalizes clip transforms", () => {

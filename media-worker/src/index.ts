@@ -105,10 +105,12 @@ async function exportProject(job: Job, state: ProjectState) {
     const filters: string[] = [];
     const clips = [...state.clips].sort((a, b) => a.timelineStartMs - b.timelineStartMs);
     const videoDuration = Math.max(...clips.map((clip) => clip.timelineStartMs + (clip.sourceOutMs - clip.sourceInMs) / clip.speed));
-    const musicEnd = Math.max(0, ...state.music.map((music) => music.loop ? videoDuration : music.timelineStartMs + music.sourceOutMs - music.sourceInMs));
+    const musicEnd = Math.max(0, ...state.music.map((music) => music.loop ? videoDuration : music.timelineStartMs + (music.sourceOutMs - music.sourceInMs) / music.speed));
     const totalDuration = Math.max(videoDuration, musicEnd);
-    filters.push(`color=c=black:s=1920x1080:r=30:d=${seconds(totalDuration)}[basev]`);
-    if (audio || state.music.length) filters.push(`anullsrc=r=48000:cl=stereo:d=${seconds(totalDuration)}[basea]`);
+    const simpleVideo = clips.length === 1 && clips[0].timelineStartMs === 0 && Math.abs(videoDuration - totalDuration) < 1 && clips[0].scaleX === 1 && clips[0].scaleY === 1 && clips[0].positionX === 0 && clips[0].positionY === 0 && clips[0].fadeInMs === 0 && clips[0].fadeOutMs === 0 && clips[0].transition.type === "cut";
+    const simpleAudio = audio && clips.length === 1 && !state.music.length && clips[0].timelineStartMs === 0 && Math.abs(videoDuration - totalDuration) < 1;
+    if (!simpleVideo) filters.push(`color=c=black:s=1920x1080:r=30:d=${seconds(totalDuration)}[basev]`);
+    if ((audio || state.music.length) && !simpleAudio) filters.push(`anullsrc=r=48000:cl=stereo:d=${seconds(totalDuration)}[basea]`);
 
     clips.forEach((clip, index) => {
       const duration = (clip.sourceOutMs - clip.sourceInMs) / clip.speed;
@@ -123,14 +125,13 @@ async function exportProject(job: Job, state: ProjectState) {
         `trim=start=${seconds(clip.sourceInMs)}:end=${seconds(clip.sourceOutMs)}`,
         `setpts=(PTS-STARTPTS)/${clip.speed}`,
         "fps=30",
-        `colorchannelmixer=rr=${1 + clip.brightness}:gg=${1 + clip.brightness}:bb=${1 + clip.brightness}`,
-        `eq=contrast=${clip.contrast}:saturation=${clip.saturation}`,
-        `hue=h=${clip.hue}`,
-        "scale=1920:1080:force_original_aspect_ratio=decrease",
-        "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black",
-        `scale=max(2\\,trunc(iw*${clip.scaleX}/2)*2):max(2\\,trunc(ih*${clip.scaleY}/2)*2)`,
-        "format=yuva420p",
       ];
+      if (clip.brightness !== 0) videoFilters.push(`colorchannelmixer=rr=${1 + clip.brightness}:gg=${1 + clip.brightness}:bb=${1 + clip.brightness}`);
+      if (clip.contrast !== 1 || clip.saturation !== 1) videoFilters.push(`eq=contrast=${clip.contrast}:saturation=${clip.saturation}`);
+      if (clip.hue !== 0) videoFilters.push(`hue=h=${clip.hue}`);
+      videoFilters.push("scale=1920:1080:force_original_aspect_ratio=decrease", "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black");
+      if (clip.scaleX !== 1 || clip.scaleY !== 1) videoFilters.push(`scale=max(2\\,trunc(iw*${clip.scaleX}/2)*2):max(2\\,trunc(ih*${clip.scaleY}/2)*2)`);
+      videoFilters.push(simpleVideo ? "format=yuv420p" : "format=yuva420p");
       if (videoFadeIn > 0) videoFilters.push(`fade=t=in:st=0:d=${seconds(videoFadeIn)}:alpha=1`);
       if (videoFadeOut > 0) videoFilters.push(`fade=t=out:st=${seconds(duration - videoFadeOut)}:d=${seconds(videoFadeOut)}:alpha=1`);
       videoFilters.push(`setpts=PTS+${seconds(clip.timelineStartMs)}/TB`);
@@ -144,17 +145,20 @@ async function exportProject(job: Job, state: ProjectState) {
       }
     });
 
-    let video = "basev";
-    clips.forEach((clip, index) => {
+    let video = simpleVideo ? "v0" : "basev";
+    if (!simpleVideo) clips.forEach((clip, index) => {
       const nextVideo = `vx${index}`;
       const end = clip.timelineStartMs + (clip.sourceOutMs - clip.sourceInMs) / clip.speed;
-      filters.push(`[${video}][v${index}]overlay=x='(main_w-overlay_w)/2+main_w*${clip.positionX}/100':y='(main_h-overlay_h)/2+main_h*${clip.positionY}/100':eof_action=pass:shortest=0:enable='between(t,${seconds(clip.timelineStartMs)},${seconds(end)})'[${nextVideo}]`);
+      filters.push(`[${video}][v${index}]overlay=x='(main_w-overlay_w)/2+main_w*${clip.positionX}/100':y='(main_h-overlay_h)/2+main_h*${clip.positionY}/100':eof_action=repeat:shortest=0:enable='between(t,${seconds(clip.timelineStartMs)},${seconds(end)})'[${nextVideo}]`);
       video = nextVideo;
     });
     const audioTracks: string[] = [];
     if (audio) {
-      filters.push(`${clips.map((_, index) => `[a${index}]`).join("")}amix=inputs=${clips.length}:duration=longest:normalize=0[sourcea]`);
-      audioTracks.push("[sourcea]");
+      if (simpleAudio) audioTracks.push("[a0]");
+      else {
+        filters.push(`${clips.map((_, index) => `[a${index}]`).join("")}amix=inputs=${clips.length}:duration=longest:normalize=0[sourcea]`);
+        audioTracks.push("[sourcea]");
+      }
     }
     state.music.forEach((music, index) => {
       const available = Math.max(0, totalDuration - music.timelineStartMs);
@@ -171,7 +175,8 @@ async function exportProject(job: Job, state: ProjectState) {
       audioTracks.push(`[music${index}]`);
     });
     let audioLabel = "";
-    if (audioTracks.length) {
+    if (simpleAudio) audioLabel = "a0";
+    else if (audioTracks.length) {
       audioLabel = "aout";
       filters.push(`[basea]${audioTracks.join("")}amix=inputs=${audioTracks.length + 1}:duration=longest:normalize=0[${audioLabel}]`);
     }

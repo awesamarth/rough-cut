@@ -30,12 +30,48 @@ export type TranscriptWord = {
   confidence?: number;
 };
 
+export function sanitizeTranscript(words: TranscriptWord[]) {
+  return words.flatMap((word) => {
+    const clean = { ...word, word: word.word.trim(), startMs: Math.round(word.startMs), endMs: Math.round(word.endMs) };
+    return clean.word && Number.isFinite(clean.startMs) && Number.isFinite(clean.endMs) && clean.startMs >= 0 && clean.endMs > clean.startMs ? [clean] : [];
+  });
+}
+
+export function correctTranscriptWords(words: TranscriptWord[], wordIds: string[], text: string) {
+  const ids = new Set(wordIds);
+  const selected = words.filter((word) => ids.has(word.id));
+  if (!selected.length || !text.trim()) return null;
+  const firstId = selected[0].id;
+  return {
+    anchorId: firstId,
+    words: words.flatMap((word) => word.id === firstId ? [{
+      ...word,
+      word: text.trim(),
+      startMs: Math.min(...selected.map((item) => item.startMs)),
+      endMs: Math.max(...selected.map((item) => item.endMs)),
+    }] : ids.has(word.id) ? [] : [word]),
+  };
+}
+
+export function excludeTranscriptFromSilences(ranges: Array<{ startMs: number; endMs: number }>, words: TranscriptWord[], paddingMs: number, minimumMs: number) {
+  return ranges.flatMap((range) => words.reduce<Array<{ startMs: number; endMs: number }>>((pieces, word) => pieces.flatMap((piece) => {
+    const startMs = Math.max(0, word.startMs - paddingMs);
+    const endMs = word.endMs + paddingMs;
+    if (endMs <= piece.startMs || startMs >= piece.endMs) return [piece];
+    return [
+      { startMs: piece.startMs, endMs: Math.min(startMs, piece.endMs) },
+      { startMs: Math.max(endMs, piece.startMs), endMs: piece.endMs },
+    ].filter((candidate) => candidate.endMs - candidate.startMs >= minimumMs);
+  }), [range]));
+}
+
 export type TimedText = {
   id: string;
   text: string;
   startMs: number;
   endMs: number;
   position: "top" | "center" | "bottom";
+  sourceWordIds?: string[];
   fontSize?: number;
   color?: "white" | "yellow" | "lime";
   background?: boolean;
@@ -213,6 +249,72 @@ export function groupCaptionWords(words: TranscriptWord[], maxWords = 5, pauseMs
   return groups;
 }
 
+export function captionsFromTranscript(state: ProjectState, transcript: TranscriptWord[]) {
+  return timelineClips(state).flatMap((entry) => {
+    const words = transcript.filter((word) => word.startMs >= entry.clip.sourceInMs && word.endMs <= entry.clip.sourceOutMs);
+    return groupCaptionWords(words).map((group) => ({
+      text: group.map((word) => word.word).join(" "),
+      startMs: entry.startMs + (group[0].startMs - entry.clip.sourceInMs) / entry.clip.speed,
+      endMs: entry.startMs + (group.at(-1)!.endMs - entry.clip.sourceInMs) / entry.clip.speed,
+      position: "bottom" as const,
+      sourceWordIds: group.map((word) => word.id),
+    }));
+  });
+}
+
+type MappedWord = TranscriptWord & { clipId: string; timelineStartMs: number; timelineEndMs: number };
+
+function mapCaptionWords(state: ProjectState, transcript: TranscriptWord[], sourceWordIds: string[]) {
+  const wanted = new Set(sourceWordIds);
+  return timelineClips(state).flatMap(({ clip, startMs }) => transcript.flatMap<MappedWord>((word) => {
+    if (!wanted.has(word.id) || word.startMs < clip.sourceInMs || word.endMs > clip.sourceOutMs) return [];
+    return [{ ...word, clipId: clip.id, timelineStartMs: startMs + (word.startMs - clip.sourceInMs) / clip.speed, timelineEndMs: startMs + (word.endMs - clip.sourceInMs) / clip.speed }];
+  })).sort((a, b) => a.timelineStartMs - b.timelineStartMs);
+}
+
+export function partitionCaptionWords(state: ProjectState, transcript: TranscriptWord[], caption: TimedText, timelineMs: number) {
+  const words = mapCaptionWords(state, transcript, caption.sourceWordIds ?? []);
+  const left = words.filter((word) => (word.timelineStartMs + word.timelineEndMs) / 2 < timelineMs);
+  const right = words.filter((word) => !left.includes(word));
+  if (!left.length || !right.length) throw new Error("Split an anchored caption between words");
+  return {
+    left: { sourceWordIds: left.map((word) => word.id), text: left.map((word) => word.word).join(" ") },
+    right: { sourceWordIds: right.map((word) => word.id), text: right.map((word) => word.word).join(" ") },
+  };
+}
+
+export function reconcileAnchoredCaptions(before: ProjectState, after: ProjectState, transcript: TranscriptWord[]) {
+  const manual = after.captions.filter((caption) => !caption.sourceWordIds?.length);
+  const claimed = new Set<string>();
+  const anchored = before.captions.flatMap((caption) => {
+    const sourceWordIds = caption.sourceWordIds?.filter((wordId) => !claimed.has(wordId));
+    if (!sourceWordIds?.length) return [];
+    sourceWordIds.forEach((wordId) => claimed.add(wordId));
+    const oldWords = mapCaptionWords(before, transcript, sourceWordIds);
+    const newWords = mapCaptionWords(after, transcript, sourceWordIds);
+    if (!oldWords.length || !newWords.length) return [];
+    const oldWordMs = oldWords[0].timelineEndMs - oldWords[0].timelineStartMs;
+    const newFirstWord = newWords.find((word) => word.id === oldWords[0].id) ?? newWords[0];
+    const timingScale = oldWordMs > 0 ? (newFirstWord.timelineEndMs - newFirstWord.timelineStartMs) / oldWordMs : 1;
+    const startOffsetMs = (caption.startMs - oldWords[0].timelineStartMs) * timingScale;
+    const endOffsetMs = (caption.endMs - oldWords.at(-1)!.timelineEndMs) * timingScale;
+    const groups = newWords.reduce<MappedWord[][]>((result, word) => {
+      const group = result.at(-1);
+      if (group?.[0].clipId === word.clipId) group.push(word);
+      else result.push([word]);
+      return result;
+    }, []);
+    return groups.flatMap((group, index) => {
+      const startMs = Math.max(0, group[0].timelineStartMs + (index === 0 ? startOffsetMs : 0));
+      const endMs = Math.min(timelineDuration(after), group.at(-1)!.timelineEndMs + (index === groups.length - 1 ? endOffsetMs : 0));
+      if (endMs - startMs < 50) return [];
+      const groupIds = group.map((word) => word.id);
+      return [{ ...caption, id: index === 0 ? caption.id : id(), text: groupIds.length === sourceWordIds.length ? caption.text : group.map((word) => word.word).join(" "), startMs, endMs, sourceWordIds: groupIds }];
+    });
+  });
+  return [...manual, ...anchored].sort((a, b) => a.startMs - b.startMs);
+}
+
 export function migrateProjectState(state: ProjectState): ProjectState {
   let cursor = 0;
   const music = state.music as unknown as MusicClip | MusicClip[] | null | undefined;
@@ -301,6 +403,34 @@ function assertTimelineLayout(clips: Clip[]) {
   }
 }
 
+type TimeRange = { startMs: number; endMs: number };
+
+function mergeRanges(ranges: TimeRange[]) {
+  return [...ranges].sort((a, b) => a.startMs - b.startMs).reduce<TimeRange[]>((merged, range) => {
+    const previous = merged.at(-1);
+    if (previous && range.startMs <= previous.endMs) previous.endMs = Math.max(previous.endMs, range.endMs);
+    else merged.push({ ...range });
+    return merged;
+  }, []);
+}
+
+function collapseTime(ms: number, ranges: TimeRange[]) {
+  let removed = 0;
+  for (const range of ranges) {
+    if (ms >= range.endMs) removed += range.endMs - range.startMs;
+    else if (ms > range.startMs) return range.startMs - removed;
+    else break;
+  }
+  return ms - removed;
+}
+
+function collapseTimedText(items: TimedText[], ranges: TimeRange[]) {
+  return items.flatMap((item) => {
+    const adjusted = { ...item, startMs: collapseTime(item.startMs, ranges), endMs: collapseTime(item.endMs, ranges) };
+    return adjusted.endMs - adjusted.startMs >= 50 ? [adjusted] : [];
+  });
+}
+
 function subtractRanges(clip: Clip, ranges: Array<{ startMs: number; endMs: number }>) {
   let pieces = [{ startMs: clip.sourceInMs, endMs: clip.sourceOutMs }];
   for (const range of ranges) {
@@ -340,7 +470,7 @@ export function validateState(value: unknown): asserts value is ProjectState {
     if (!Array.isArray(collection)) throw new Error("Invalid text items");
     collection.forEach((item) => {
       validateRange(item.startMs, item.endMs, duration);
-      if (typeof item.text !== "string" || !item.text.trim() || !["top", "center", "bottom"].includes(item.position) || item.fontSize !== undefined && (!Number.isFinite(item.fontSize) || item.fontSize < 16 || item.fontSize > 160) || item.color !== undefined && !["white", "yellow", "lime"].includes(item.color) || item.background !== undefined && typeof item.background !== "boolean") throw new Error("Invalid text item");
+      if (typeof item.text !== "string" || !item.text.trim() || !["top", "center", "bottom"].includes(item.position) || item.sourceWordIds !== undefined && (!Array.isArray(item.sourceWordIds) || item.sourceWordIds.some((id) => typeof id !== "string")) || item.fontSize !== undefined && (!Number.isFinite(item.fontSize) || item.fontSize < 16 || item.fontSize > 160) || item.color !== undefined && !["white", "yellow", "lime"].includes(item.color) || item.background !== undefined && typeof item.background !== "boolean") throw new Error("Invalid text item");
     });
   }
   if (!state.captionStyle || !["small", "medium", "large"].includes(state.captionStyle.size) || !["white", "yellow", "lime"].includes(state.captionStyle.color) || typeof state.captionStyle.background !== "boolean" || !Number.isFinite(state.captionStyle.backgroundOpacity) || state.captionStyle.backgroundOpacity < 0 || state.captionStyle.backgroundOpacity > 1) throw new Error("Invalid caption style");
@@ -391,7 +521,12 @@ export function applyCommand(state: ProjectState, command: EditorCommand): Proje
       assertNotProtected(state, { startMs: clip.sourceInMs, endMs: clip.sourceOutMs });
       const rippleMs = command.ripple ? clipDuration(clip) - clip.transition.durationMs : 0;
       next.clips.splice(clipIndex, 1);
-      if (rippleMs) next.clips.slice(clipIndex).forEach((item) => { item.timelineStartMs = Math.max(0, item.timelineStartMs - rippleMs); });
+      if (rippleMs) {
+        next.clips.slice(clipIndex).forEach((item) => { item.timelineStartMs = Math.max(0, item.timelineStartMs - rippleMs); });
+        const removed = [{ startMs: clip.timelineStartMs, endMs: clip.timelineStartMs + rippleMs }];
+        next.captions = collapseTimedText(next.captions, removed);
+        next.overlays = collapseTimedText(next.overlays, removed);
+      }
       break;
     }
     case "remove_segments": {
@@ -399,7 +534,22 @@ export function applyCommand(state: ProjectState, command: EditorCommand): Proje
         validateRange(range.startMs, range.endMs, state.durationMs);
         assertNotProtected(state, range);
       }
-      next.clips = next.clips.flatMap((clip) => subtractRanges(clip, command.ranges));
+      const pieces = next.clips.map((clip) => ({ clip, pieces: subtractRanges(clip, command.ranges) }));
+      const removed = mergeRanges(pieces.flatMap(({ clip, pieces }) => {
+        const kept = pieces.map((piece) => ({ startMs: piece.timelineStartMs, endMs: piece.timelineStartMs + clipDuration(piece) }));
+        const gaps: TimeRange[] = [];
+        let cursor = clip.timelineStartMs;
+        for (const piece of kept) {
+          if (piece.startMs > cursor) gaps.push({ startMs: cursor, endMs: piece.startMs });
+          cursor = piece.endMs;
+        }
+        const endMs = clip.timelineStartMs + clipDuration(clip);
+        if (cursor < endMs) gaps.push({ startMs: cursor, endMs });
+        return gaps;
+      }));
+      next.clips = pieces.flatMap(({ pieces }) => pieces.map((piece) => ({ ...piece, timelineStartMs: collapseTime(piece.timelineStartMs, removed) })));
+      next.captions = collapseTimedText(next.captions, removed);
+      next.overlays = collapseTimedText(next.overlays, removed);
       break;
     }
     case "reorder_clips": {

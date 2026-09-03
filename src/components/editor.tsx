@@ -2,8 +2,8 @@
 
 import Link from "next/link";
 import { Download, Link2, Magnet, Maximize2, Minimize2, RotateCcw, Unlink2, Volume2, VolumeX } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
-import { clipDuration, exportSrt, groupCaptionWords, musicClipEnd, timelineClips, timelineDuration, timelineToSource, type Clip, type MusicClip, type ProjectState, type TimedText, type TranscriptWord } from "@/lib/editor";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { captionsFromTranscript, clipDuration, excludeTranscriptFromSilences, exportSrt, musicClipEnd, timelineClips, timelineDuration, timelineToSource, type Clip, type MusicClip, type ProjectState, type TimedText, type TranscriptWord } from "@/lib/editor";
 import { exportEdl } from "@/lib/edl";
 import { type CommandInput, useEditor } from "./use-editor";
 import { useWebMCP } from "./use-webmcp";
@@ -51,7 +51,9 @@ export function Editor({ projectId }: { projectId: string }) {
   const readyDownloadRef = useRef<HTMLButtonElement>(null);
   const autoTranscribeStarted = useRef(false);
   const [selectedClipId, setSelectedClipId] = useState("");
+  const activeIndexRef = useRef(-1);
   const [activeIndex, setActiveIndex] = useState(-1);
+  const activateClip = useCallback((index: number) => { activeIndexRef.current = index; setActiveIndex(index); }, []);
   const [playheadMs, setPlayheadMs] = useState(0);
   const [secondaryOpacity, setSecondaryOpacity] = useState(0);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -153,10 +155,10 @@ export function Editor({ projectId }: { projectId: string }) {
 
   useEffect(() => {
     if (state && selectedClipId && !state.clips.some((clip) => clip.id === selectedClipId)) setSelectedClipId("");
-    if (state && activeIndex >= state.clips.length) setActiveIndex(Math.max(0, state.clips.length - 1));
+    if (state && activeIndex >= state.clips.length) activateClip(Math.max(0, state.clips.length - 1));
     if (state && selectedMusicId && !state.music.some((music) => music.id === selectedMusicId)) setSelectedMusicId(state.music[0]?.id ?? "");
     if (state && selectedText && !(selectedText.kind === "caption" ? state.captions : state.overlays).some((item) => item.id === selectedText.id)) setSelectedText(null);
-  }, [activeIndex, selectedClipId, selectedMusicId, selectedText, state]);
+  }, [activateClip, activeIndex, selectedClipId, selectedMusicId, selectedText, state]);
 
   const setMediaGain = useCallback((element: HTMLMediaElement, value: number) => {
     const gain = Math.max(0, Math.min(5, value));
@@ -231,14 +233,14 @@ export function Editor({ projectId }: { projectId: string }) {
       gapFrame.current = null;
       if (nextIndex < 0) { setIsPlaying(false); return; }
       const entry = clips[nextIndex];
-      setActiveIndex(nextIndex);
+      activateClip(nextIndex);
       setBlackOpacity(0);
       videoRef.current!.currentTime = entry.clip.sourceInMs / 1000;
       videoRef.current!.playbackRate = entry.clip.speed;
       playVideo(videoRef.current!);
     };
     gapFrame.current = requestAnimationFrame(tick);
-  }, [playVideo, state, stopGapPlayback, syncMusic, totalMs]);
+  }, [activateClip, playVideo, state, stopGapPlayback, syncMusic, totalMs]);
 
   const seekTimeline = useCallback((targetMs: number) => {
     const video = videoRef.current;
@@ -251,7 +253,7 @@ export function Editor({ projectId }: { projectId: string }) {
     setPlayheadMs(clamped);
     syncMusic(clamped, resume);
     if (index < 0) {
-      setActiveIndex(-1);
+      activateClip(-1);
       video.pause();
       setSecondaryOpacity(0); setBlackOpacity(1);
       if (resume) startGapPlayback(clamped);
@@ -259,13 +261,13 @@ export function Editor({ projectId }: { projectId: string }) {
     }
     const entry = all[index];
     const sourceMs = entry.clip.sourceInMs + (clamped - entry.startMs) * entry.clip.speed;
-    setActiveIndex(index);
+    activateClip(index);
     video.currentTime = Math.min(entry.clip.sourceOutMs - 1, sourceMs) / 1000;
     video.playbackRate = entry.clip.speed;
     transitionStarted.current = false;
     setSecondaryOpacity(0); setBlackOpacity(0);
     if (resume && video.paused) playVideo(video);
-  }, [isPlaying, playVideo, startGapPlayback, state, stopGapPlayback, syncMusic, totalMs]);
+  }, [activateClip, isPlaying, playVideo, startGapPlayback, state, stopGapPlayback, syncMusic, totalMs]);
 
   const ensureInitialSeek = useCallback(() => {
     if (initialSeekDone.current || !state || !videoRef.current || videoRef.current.readyState < 1) return;
@@ -293,66 +295,71 @@ export function Editor({ projectId }: { projectId: string }) {
 
   const updatePlayback = useCallback(() => {
     const video = videoRef.current;
-    if (!video || video.paused || !state || !activeClip) return;
-    const entry = timelineClips(state)[activeIndex];
+    if (!video || video.paused || !state) return;
+    const clips = timelineClips(state);
+    const index = activeIndexRef.current;
+    const entry = clips[index];
+    if (!entry) return;
+    const clip = entry.clip;
+    const following = clips[index + 1];
     const sourceMs = video.currentTime * 1000;
-    const currentTimelineMs = entry.startMs + (sourceMs - activeClip.sourceInMs) / activeClip.speed;
+    const currentTimelineMs = Math.min(entry.endMs, entry.startMs + (sourceMs - clip.sourceInMs) / clip.speed);
     setPlayheadMs(Math.max(0, Math.min(currentTimelineMs, totalMs)));
     syncMusic(currentTimelineMs, !video.paused);
 
-    const remainingMs = (activeClip.sourceOutMs - sourceMs) / activeClip.speed;
-    const transitionMs = activeClip.transition.durationMs;
-    if (nextClip && activeClip.transition.type !== "cut" && transitionMs > 0 && remainingMs <= transitionMs) {
+    const remainingMs = (clip.sourceOutMs - sourceMs) / clip.speed;
+    const transitionMs = clip.transition.durationMs;
+    if (following && clip.transition.type !== "cut" && transitionMs > 0 && remainingMs <= transitionMs) {
       const progress = Math.max(0, Math.min(1, 1 - remainingMs / transitionMs));
-      if (activeClip.transition.type === "crossfade") {
+      if (clip.transition.type === "crossfade") {
         const secondary = nextVideoRef.current;
         if (secondary && !transitionStarted.current) {
-          secondary.currentTime = nextClip.sourceInMs / 1000;
-          secondary.playbackRate = nextClip.speed;
-          setMediaGain(secondary, nextClip.muted ? 0 : nextClip.volume);
+          secondary.currentTime = following.clip.sourceInMs / 1000;
+          secondary.playbackRate = following.clip.speed;
+          setMediaGain(secondary, following.clip.muted ? 0 : following.clip.volume);
           transitionStarted.current = true;
           if (!video.paused) void secondary.play();
         }
         setSecondaryOpacity(progress);
-        setMediaGain(video, (activeClip.muted ? 0 : activeClip.volume) * (1 - progress));
-        if (secondary) setMediaGain(secondary, (nextClip.muted ? 0 : nextClip.volume) * progress);
+        setMediaGain(video, (clip.muted ? 0 : clip.volume) * (1 - progress));
+        if (secondary) setMediaGain(secondary, (following.clip.muted ? 0 : following.clip.volume) * progress);
       } else {
         setBlackOpacity(1 - Math.abs(progress * 2 - 1));
       }
     }
 
-    const clipElapsedMs = (sourceMs - activeClip.sourceInMs) / activeClip.speed;
-    const durationMs = clipDuration(activeClip);
+    const clipElapsedMs = (sourceMs - clip.sourceInMs) / clip.speed;
+    const durationMs = clipDuration(clip);
     const edgeFade = Math.max(
-      activeClip.fadeInMs ? 1 - clipElapsedMs / activeClip.fadeInMs : 0,
-      activeClip.fadeOutMs ? 1 - (durationMs - clipElapsedMs) / activeClip.fadeOutMs : 0,
+      clip.fadeInMs ? 1 - clipElapsedMs / clip.fadeInMs : 0,
+      clip.fadeOutMs ? 1 - (durationMs - clipElapsedMs) / clip.fadeOutMs : 0,
     );
     if (edgeFade > 0) setBlackOpacity((current) => Math.max(current, Math.min(1, edgeFade)));
 
-    if (sourceMs >= activeClip.sourceOutMs - 15) {
-      if (!nextClip) { video.pause(); if (entry.endMs < totalMs - 1) startGapPlayback(entry.endMs); else setPlayheadMs(totalMs); return; }
-      const nextEntry = timelineClips(state)[activeIndex + 1];
-      if (nextEntry.startMs > entry.endMs + 1) { video.pause(); startGapPlayback(entry.endMs); return; }
-      const overlapMs = activeClip.transition.type === "cut" ? 0 : activeClip.transition.durationMs;
-      setActiveIndex(activeIndex + 1);
-      video.currentTime = (nextClip.sourceInMs + overlapMs * nextClip.speed) / 1000;
-      video.playbackRate = nextClip.speed;
-      setMediaGain(video, nextClip.muted ? 0 : nextClip.volume);
+    if (sourceMs >= clip.sourceOutMs - 15) {
+      if (!following) { video.pause(); if (entry.endMs < totalMs - 1) startGapPlayback(entry.endMs); else setPlayheadMs(totalMs); return; }
+      if (following.startMs > entry.endMs + 1) { video.pause(); startGapPlayback(entry.endMs); return; }
+      const overlapMs = clip.transition.type === "cut" ? 0 : clip.transition.durationMs;
+      activateClip(index + 1);
+      video.currentTime = (following.clip.sourceInMs + overlapMs * following.clip.speed) / 1000;
+      video.playbackRate = following.clip.speed;
+      setMediaGain(video, following.clip.muted ? 0 : following.clip.volume);
       transitionStarted.current = false;
       nextVideoRef.current?.pause();
       setSecondaryOpacity(0); setBlackOpacity(0);
       if (!video.paused) playVideo(video);
     }
-  }, [activeClip, activeIndex, nextClip, playVideo, setMediaGain, startGapPlayback, state, syncMusic, totalMs]);
+  }, [activateClip, playVideo, setMediaGain, startGapPlayback, state, syncMusic, totalMs]);
 
   const handleVideoEnded = useCallback(() => {
     const video = videoRef.current;
-    if (!video || !state || activeIndex < 0) return;
+    const index = activeIndexRef.current;
+    if (!video || !state || index < 0) return;
     const clips = timelineClips(state);
-    const current = clips[activeIndex];
-    const next = clips[activeIndex + 1];
+    const current = clips[index];
+    const next = clips[index + 1];
     if (next && next.startMs <= current.endMs + 1) {
-      setActiveIndex(activeIndex + 1);
+      activateClip(index + 1);
       video.currentTime = next.clip.sourceInMs / 1000;
       video.playbackRate = next.clip.speed;
       setSecondaryOpacity(0); setBlackOpacity(0);
@@ -363,7 +370,7 @@ export function Editor({ projectId }: { projectId: string }) {
       setPlayheadMs(totalMs);
       setIsPlaying(false);
     }
-  }, [activeIndex, playVideo, startGapPlayback, state, totalMs]);
+  }, [activateClip, playVideo, startGapPlayback, state, totalMs]);
 
   const togglePlayback = useCallback(() => {
     const video = videoRef.current;
@@ -1044,14 +1051,7 @@ function TranscriptPanel({ state, transcript, playheadMs, dispatch, transcribeVi
 
   const selectedRange = selection && transcript.length ? { startMs: transcript[Math.min(...selection)].startMs, endMs: transcript[Math.max(...selection)].endMs } : null;
   function generateCaptions() {
-    const items: Array<Omit<TimedText, "id">> = [];
-    for (const entry of timelineClips(state)) {
-      const words = transcript.filter((word) => word.startMs >= entry.clip.sourceInMs && word.endMs <= entry.clip.sourceOutMs);
-      for (const group of groupCaptionWords(words)) {
-        items.push({ text: group.map((word) => word.word).join(" "), startMs: entry.startMs + (group[0].startMs - entry.clip.sourceInMs) / entry.clip.speed, endMs: entry.startMs + (group.at(-1)!.endMs - entry.clip.sourceInMs) / entry.clip.speed, position: "bottom" });
-      }
-    }
-    dispatch({ type: "set_captions", actor: "human", items });
+    dispatch({ type: "set_captions", actor: "human", items: captionsFromTranscript(state, transcript) });
   }
 
   return <div>
@@ -1060,7 +1060,7 @@ function TranscriptPanel({ state, transcript, playheadMs, dispatch, transcribeVi
       {transcript.length ? <>
         <button className="cursor-pointer whitespace-nowrap rounded-md border border-[#333944] bg-[#20242b] px-2.5 py-1.75 text-[10px]" disabled={!selectedRange} onClick={() => selectedRange && dispatch({ type: "protect_segment", actor: "human", ...selectedRange, label: "Protected by human" })}>Protect selection</button>
         <button className="cursor-pointer whitespace-nowrap rounded-md border border-[#333944] bg-[#20242b] px-2.5 py-1.75 text-[10px]" disabled={!selectedRange} onClick={() => selectedRange && dispatch({ type: "remove_segments", actor: "human", ranges: [selectedRange] })}>Cut selection</button>
-        <button className="cursor-pointer whitespace-nowrap rounded-md border border-[#333944] bg-[#20242b] px-2.5 py-1.75 text-[10px]" onClick={generateCaptions}>Generate captions</button>
+        <button className="cursor-pointer whitespace-nowrap rounded-md border border-[#333944] bg-[#20242b] px-2.5 py-1.75 text-[10px]" onClick={generateCaptions}>{state.captions.length ? "Resync captions" : "Generate captions"}</button>
       </> : <>
         <select className="w-auto rounded-[5px] border border-[var(--line)] bg-[#0e1014] p-1.75 text-[11px]" aria-label="Transcription provider" value={provider} onChange={(event) => setProvider(event.target.value as typeof provider)}><option value="cloudflare">Cloudflare Whisper Large v3</option><option value="openai">OpenAI whisper-1 (your key)</option></select>
         {provider === "openai" && <><input className="min-w-[180px] rounded-md border border-[var(--line)] bg-[#0b0d10] px-2.25 py-1.75 text-[11px] text-white" aria-label="OpenAI API key" type="password" autoComplete="off" placeholder="OpenAI API key" value={apiKey} onChange={(event) => { const value = event.target.value; setApiKey(value); if (rememberApiKey) { if (value) localStorage.setItem("rough-cut.openai-api-key", value); else localStorage.removeItem("rough-cut.openai-api-key"); } }} /><label className="flex items-center gap-1.5 whitespace-nowrap text-[10px] text-[var(--muted)]"><input type="checkbox" checked={rememberApiKey} onChange={(event) => { setRememberApiKey(event.target.checked); if (event.target.checked && apiKey) localStorage.setItem("rough-cut.openai-api-key", apiKey); else localStorage.removeItem("rough-cut.openai-api-key"); }} />Remember on this device</label></>}
@@ -1115,13 +1115,16 @@ function MusicPanel({ projectId, state, requested, onRequestComplete, dispatch, 
 
 function SilencePanel({ transcript, detect, dispatch, setError }: { transcript: TranscriptWord[]; detect(threshold: number, minimum: number): Promise<Array<{ startMs: number; endMs: number }>>; dispatch(command: CommandInput): ProjectState; setError(message: string): void }) {
   const [threshold, setThreshold] = useState(-35); const [minimum, setMinimum] = useState(500); const [padding, setPadding] = useState(200);
-  const [ranges, setRanges] = useState<Array<{ startMs: number; endMs: number }>>([]); const [selected, setSelected] = useState<Set<number>>(new Set()); const [working, setWorking] = useState(false);
-  const scan = async () => { setWorking(true); try { const found = (await detect(threshold, minimum)).filter((range) => !transcript.some((word) => word.startMs < range.endMs && range.startMs < word.endMs)); setRanges(found); setSelected(new Set(found.map((_, index) => index))); } catch (cause) { setError((cause as Error).message); } finally { setWorking(false); } };
+  const [detected, setDetected] = useState<Array<{ startMs: number; endMs: number }>>([]); const [excluded, setExcluded] = useState<Set<string>>(new Set()); const [working, setWorking] = useState(false);
+  const ranges = useMemo(() => excludeTranscriptFromSilences(detected, transcript, padding, minimum), [detected, transcript, padding, minimum]);
+  const keyOf = (range: { startMs: number; endMs: number }) => `${range.startMs}-${range.endMs}`;
+  const selectedCount = ranges.filter((range) => !excluded.has(keyOf(range))).length;
+  const scan = async () => { setWorking(true); try { setDetected(await detect(threshold, minimum)); setExcluded(new Set()); } catch (cause) { setError((cause as Error).message); } finally { setWorking(false); } };
   const apply = () => {
-    const removals = ranges.filter((_, index) => selected.has(index)).map((range) => ({ startMs: range.startMs + padding, endMs: range.endMs - padding })).filter((range) => range.endMs - range.startMs >= 50);
-    try { dispatch({ type: "remove_segments", actor: "human", ranges: removals }); setRanges([]); } catch (cause) { setError((cause as Error).message); }
+    const removals = ranges.filter((range) => !excluded.has(keyOf(range)));
+    try { dispatch({ type: "remove_segments", actor: "human", ranges: removals }); setDetected([]); } catch (cause) { setError((cause as Error).message); }
   };
-  return <div className="p-3"><div className="grid grid-cols-[repeat(3,minmax(130px,1fr))_auto] items-end gap-[18px] max-[900px]:grid-cols-2"><RangeControl label="Threshold" value={threshold} resetValue={-35} min={-60} max={-10} step={1} suffix="dB" onCommit={setThreshold} /><RangeControl label="Minimum" value={minimum} resetValue={500} min={100} max={3000} step={100} suffix="ms" onCommit={setMinimum} /><RangeControl label="Speech padding" value={padding} resetValue={200} min={0} max={500} step={25} suffix="ms" onCommit={setPadding} /><button className="cursor-pointer rounded-[7px] border-0 bg-[var(--lime)] px-[13px] py-2 text-xs font-extrabold text-[#10120d] hover:bg-[#e5ff93]" disabled={working} onClick={() => void scan()} aria-live="polite">{working ? "Scanning audio…" : "Find silences"}</button></div>{ranges.length > 0 && <><div className="my-3 grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-1.5">{ranges.map((range, index) => <label className="flex items-center gap-2 rounded-[5px] border border-[var(--line)] p-2 text-[10px]" key={`${range.startMs}-${range.endMs}`}><input type="checkbox" checked={selected.has(index)} onChange={() => setSelected((current) => { const next = new Set(current); if (next.has(index)) next.delete(index); else next.add(index); return next; })} /><span className="flex-1 text-[#bdc1c8]">{formatTime(range.startMs)} → {formatTime(range.endMs)}</span><b className="text-[var(--lime)]">{((range.endMs - range.startMs) / 1000).toFixed(1)}s</b></label>)}</div><button className="cursor-pointer whitespace-nowrap rounded-md border border-[#333944] bg-[#20242b] px-2.5 py-1.75 text-[10px]" onClick={apply}>Remove {selected.size} selected silences</button></>}</div>;
+  return <div className="p-3"><div className="grid grid-cols-[repeat(3,minmax(130px,1fr))_auto] items-end gap-[18px] max-[900px]:grid-cols-2"><RangeControl label="Threshold" value={threshold} resetValue={-35} min={-60} max={-10} step={1} suffix="dB" onCommit={setThreshold} /><RangeControl label="Minimum" value={minimum} resetValue={500} min={100} max={3000} step={100} suffix="ms" onCommit={setMinimum} /><RangeControl label="Speech padding" value={padding} resetValue={200} min={0} max={500} step={25} suffix="ms" onCommit={setPadding} /><button className="cursor-pointer rounded-[7px] border-0 bg-[var(--lime)] px-[13px] py-2 text-xs font-extrabold text-[#10120d] hover:bg-[#e5ff93]" disabled={working} onClick={() => void scan()} aria-live="polite">{working ? "Scanning audio…" : "Find silences"}</button></div>{ranges.length > 0 && <><div className="my-3 grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-1.5">{ranges.map((range) => { const key = keyOf(range); return <label className="flex items-center gap-2 rounded-[5px] border border-[var(--line)] p-2 text-[10px]" key={key}><input type="checkbox" checked={!excluded.has(key)} onChange={() => setExcluded((current) => { const next = new Set(current); if (next.has(key)) next.delete(key); else next.add(key); return next; })} /><span className="flex-1 text-[#bdc1c8]">{formatTime(range.startMs)} → {formatTime(range.endMs)}</span><b className="text-[var(--lime)]">{((range.endMs - range.startMs) / 1000).toFixed(1)}s</b></label>; })}</div><button className="cursor-pointer whitespace-nowrap rounded-md border border-[#333944] bg-[#20242b] px-2.5 py-1.75 text-[10px]" onClick={apply}>Remove {selectedCount} selected silences</button></>}</div>;
 }
 
 function ActivityPanel({ state }: { state: ProjectState }) { return <div className="px-3.5 py-2.5">{state.activity.length ? state.activity.map((item) => <div className="flex gap-2.5 border-b border-[#20242a] py-1.75" key={item.id}><span className={`grid size-[25px] place-items-center rounded-full text-[9px] uppercase ${item.actor === "agent" ? "bg-[#3c451d] text-[var(--lime)]" : "bg-[#29303a]"}`}>{item.actor.slice(0, 1)}</span><p className="m-0 flex flex-col gap-0.75 text-[11px]"><b>{item.summary}</b><small className="text-[9px] text-[var(--muted)]">{new Date(item.at).toLocaleTimeString()}</small></p></div>) : <p className="p-8 text-center text-xs text-[var(--muted)]">Edits from you and your agent will appear here.</p>}</div>; }
