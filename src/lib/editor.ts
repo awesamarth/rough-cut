@@ -41,15 +41,23 @@ export function correctTranscriptWords(words: TranscriptWord[], wordIds: string[
   const ids = new Set(wordIds);
   const selected = words.filter((word) => ids.has(word.id));
   if (!selected.length || !text.trim()) return null;
-  const firstId = selected[0].id;
+  const tokens = text.trim().split(/\s+/);
+  let prefix = 0, suffix = 0;
+  while (prefix < Math.min(tokens.length, selected.length) && tokens[prefix] === selected[prefix].word) prefix++;
+  while (suffix < Math.min(tokens.length, selected.length) - prefix && tokens[tokens.length - suffix - 1] === selected[selected.length - suffix - 1].word) suffix++;
+  const replaced = selected.slice(prefix, selected.length - suffix);
+  const inserted = tokens.slice(prefix, tokens.length - suffix);
+  const start = replaced[0]?.startMs ?? selected[Math.min(prefix, selected.length - 1)].startMs;
+  const end = replaced.at(-1)?.endMs ?? selected[Math.min(prefix, selected.length - 1)].endMs;
+  const middle = inserted.map((word, index): TranscriptWord => ({
+    id: replaced[index]?.id ?? id(), word, confidence: 0,
+    startMs: replaced.length === inserted.length ? replaced[index].startMs : Math.floor(start + (end - start) * index / inserted.length),
+    endMs: replaced.length === inserted.length ? replaced[index].endMs : Math.max(Math.floor(start + (end - start) * index / inserted.length) + 1, Math.floor(start + (end - start) * (index + 1) / inserted.length)),
+  }));
+  const corrected = [...selected.slice(0, prefix), ...middle, ...selected.slice(selected.length - suffix)];
   return {
-    anchorId: firstId,
-    words: words.flatMap((word) => word.id === firstId ? [{
-      ...word,
-      word: text.trim(),
-      startMs: Math.min(...selected.map((item) => item.startMs)),
-      endMs: Math.max(...selected.map((item) => item.endMs)),
-    }] : ids.has(word.id) ? [] : [word]),
+    anchorIds: corrected.map((word) => word.id),
+    words: words.flatMap((word) => word.id === selected[0].id ? corrected : ids.has(word.id) ? [] : [word]).sort((a, b) => a.startMs - b.startMs || a.endMs - b.endMs),
   };
 }
 
@@ -155,7 +163,10 @@ export type EditorCommand =
   | { type: "remove_broll"; expectedVersion: number; actor: Actor; id: string };
 
 const id = () => crypto.randomUUID();
-const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+const clamp = (value: number, min: number, max: number) => {
+  if (![value, min, max].every(Number.isFinite)) throw new Error("Expected finite numeric values");
+  return Math.min(max, Math.max(min, value));
+};
 const overlaps = (a: { startMs: number; endMs: number }, b: { startMs: number; endMs: number }) => a.startMs < b.endMs && b.startMs < a.endMs;
 
 export function createClip(sourceInMs: number, sourceOutMs: number, timelineStartMs = 0): Clip {
@@ -213,6 +224,30 @@ export function musicClipEnd(state: ProjectState, music: MusicClip) {
 
 export function musicTimelineEnd(state: ProjectState) {
   return Math.max(0, ...state.music.map((music) => musicClipEnd(state, music)));
+}
+
+/** Split the clicked item, not whichever video happens to be under the playhead. */
+export function bladeSplitCommand(state: ProjectState, kind: string, itemId: string, timelineMs: number): EditorCommand | null {
+  if (!Number.isFinite(timelineMs)) return null;
+  const base = { expectedVersion: state.version, actor: "human" as const };
+  if (kind === "video") {
+    const clip = state.clips.find((item) => item.id === itemId);
+    if (!clip) return null;
+    const sourceMs = clip.sourceInMs + (timelineMs - clip.timelineStartMs) * clip.speed;
+    if (sourceMs <= clip.sourceInMs || sourceMs >= clip.sourceOutMs) return null;
+    return { ...base, type: "split_clip", clipId: itemId, sourceMs };
+  }
+  if (kind === "music") {
+    const music = state.music.find((item) => item.id === itemId);
+    if (!music || timelineMs <= music.timelineStartMs || timelineMs >= musicClipEnd(state, music)) return null;
+    return { ...base, type: "split_music", clipId: itemId, timelineMs };
+  }
+  if (kind === "caption" || kind === "overlay") {
+    const text = (kind === "caption" ? state.captions : state.overlays).find((item) => item.id === itemId);
+    if (!text || timelineMs <= text.startMs || timelineMs >= text.endMs) return null;
+    return { ...base, type: "split_text", kind, id: itemId, timelineMs };
+  }
+  return null;
 }
 
 export function timelineToSource(state: ProjectState, timelineMs: number) {
@@ -350,10 +385,11 @@ function assertNotProtected(state: ProjectState, range: { startMs: number; endMs
 
 function normalizeClip(clip: Clip, durationMs: number): Clip {
   validateRange(clip.sourceInMs, clip.sourceOutMs, durationMs);
-  const adjustedDuration = (clip.sourceOutMs - clip.sourceInMs) / clip.speed;
+  const speed = clamp(clip.speed, 0.5, 2);
+  const adjustedDuration = (clip.sourceOutMs - clip.sourceInMs) / speed;
   return {
     ...clip,
-    speed: clamp(clip.speed, 0.5, 2), volume: clamp(clip.volume, 0, 5),
+    speed, volume: clamp(clip.volume, 0, 5),
     brightness: clamp(clip.brightness, -1, 1), contrast: clamp(clip.contrast, 0, 2),
     saturation: clamp(clip.saturation, 0, 3), hue: clamp(clip.hue, -180, 180),
     scaleX: clamp(clip.scaleX, 0.25, 4), scaleY: clamp(clip.scaleY, 0.25, 4),
@@ -452,22 +488,52 @@ function subtractRanges(clip: Clip, ranges: Array<{ startMs: number; endMs: numb
   }));
 }
 
+function bounded(value: number, min: number, max: number, field: string) {
+  if (!Number.isFinite(value) || value < min || value > max) throw new Error(`Invalid ${field}`);
+}
+
+function validateIds(items: Array<{ id: string }>, name: string) {
+  if (!Array.isArray(items) || items.some((item) => !item || typeof item.id !== "string" || !item.id.trim()) || new Set(items.map((item) => item.id)).size !== items.length) throw new Error(`Invalid ${name} IDs`);
+}
+
 export function validateState(value: unknown): asserts value is ProjectState {
   const state = value as ProjectState;
-  if (!state || typeof state !== "object" || typeof state.id !== "string" || typeof state.name !== "string" || !state.name.trim() || state.name.length > 120 || !Number.isInteger(state.version) || !Number.isFinite(state.durationMs) || state.durationMs <= 0) throw new Error("Invalid project state");
-  if (!Array.isArray(state.clips) || !state.clips.length || new Set(state.clips.map((clip) => clip.id)).size !== state.clips.length) throw new Error("Invalid clips");
+  if (!state || typeof state !== "object" || typeof state.id !== "string" || !state.id.trim() || typeof state.name !== "string" || !state.name.trim() || state.name.length > 120 || !Number.isSafeInteger(state.version) || state.version < 0 || !Number.isFinite(state.durationMs) || state.durationMs < 50) throw new Error("Invalid project state");
+  validateIds(state.clips, "clip");
+  if (!state.clips.length || state.clips.length > 200) throw new Error("Timeline must contain 1–200 clips");
   state.clips.forEach((clip) => {
-    normalizeClip(clip, state.durationMs);
-    if (!["cut", "crossfade", "fade-black"].includes(clip.transition.type) || !Number.isFinite(clip.transition.durationMs) || clip.transition.durationMs < 0) throw new Error("Invalid transition");
+    validateRange(clip.sourceInMs, clip.sourceOutMs, state.durationMs);
+    bounded(clip.speed, 0.5, 2, "speed");
+    bounded(clip.volume, 0, 5, "volume");
+    bounded(clip.brightness, -1, 1, "brightness");
+    bounded(clip.contrast, 0, 2, "contrast");
+    bounded(clip.saturation, 0, 3, "saturation");
+    bounded(clip.hue, -180, 180, "hue");
+    for (const field of ["scaleX", "scaleY"] as const) bounded(clip[field], 0.25, 4, field);
+    for (const field of ["positionX", "positionY"] as const) bounded(clip[field], -100, 100, field);
+    for (const field of ["fadeInMs", "fadeOutMs"] as const) bounded(clip[field], 0, clipDuration(clip) / 2, field);
+    if (typeof clip.muted !== "boolean") throw new Error("Invalid muted");
+    if (!clip.transition || !["cut", "crossfade", "fade-black"].includes(clip.transition.type) || !Number.isFinite(clip.transition.durationMs) || clip.transition.durationMs < 0) throw new Error("Invalid transition");
+  });
+  const ordered = [...state.clips].sort((a, b) => a.timelineStartMs - b.timelineStartMs);
+  ordered.forEach((clip, index) => {
+    const following = ordered[index + 1];
+    if (clip.transition.type === "cut") {
+      if (clip.transition.durationMs !== 0) throw new Error("Cuts cannot overlap");
+    } else if (!following || clip.transition.durationMs <= 0 || clip.transition.durationMs > Math.min(clipDuration(clip), clipDuration(following)) / 2 || Math.abs(following.timelineStartMs - (clip.timelineStartMs + clipDuration(clip) - clip.transition.durationMs)) > 1) throw new Error("Invalid transition layout");
   });
   assertTimelineLayout(state.clips);
   for (const collection of [state.protectedRanges, state.broll]) {
-    if (!Array.isArray(collection)) throw new Error("Invalid source ranges");
-    collection.forEach((range) => validateRange(range.startMs, range.endMs, state.durationMs));
+    validateIds(collection, "source range");
+    collection.forEach((range) => {
+      validateRange(range.startMs, range.endMs, state.durationMs);
+      if (typeof range.label !== "string") throw new Error("Invalid range label");
+    });
   }
+  validateIds(state.music, "music");
   const duration = timelineDuration(state);
   for (const collection of [state.captions, state.overlays]) {
-    if (!Array.isArray(collection)) throw new Error("Invalid text items");
+    validateIds(collection, "text");
     collection.forEach((item) => {
       validateRange(item.startMs, item.endMs, duration);
       if (typeof item.text !== "string" || !item.text.trim() || !["top", "center", "bottom"].includes(item.position) || item.sourceWordIds !== undefined && (!Array.isArray(item.sourceWordIds) || item.sourceWordIds.some((id) => typeof id !== "string")) || item.fontSize !== undefined && (!Number.isFinite(item.fontSize) || item.fontSize < 16 || item.fontSize > 160) || item.color !== undefined && !["white", "yellow", "lime"].includes(item.color) || item.background !== undefined && typeof item.background !== "boolean") throw new Error("Invalid text item");
@@ -477,11 +543,17 @@ export function validateState(value: unknown): asserts value is ProjectState {
   if (!Array.isArray(state.music) || new Set(state.music.map((music) => music.id)).size !== state.music.length) throw new Error("Invalid music");
   state.music.forEach((music) => {
     if (!/^[a-f0-9-]{36}$/i.test(music.id) || !/^[a-f0-9-]{36}$/i.test(music.assetId) || typeof music.name !== "string" || !music.name.trim() || !Number.isFinite(music.durationMs) || music.durationMs <= 0 || !Number.isFinite(music.speed) || music.speed < 0.5 || music.speed > 2 || typeof music.muted !== "boolean" || typeof music.loop !== "boolean") throw new Error("Invalid music");
-    normalizeMusic(music, videoTimelineDuration(state));
+    validateRange(music.sourceInMs, music.sourceOutMs, music.durationMs);
+    bounded(music.timelineStartMs, 0, Number.MAX_SAFE_INTEGER, "music start");
+    bounded(music.volume, 0, 5, "music volume");
+    const span = musicClipEnd(state, music) - music.timelineStartMs;
+    if (span < 25) throw new Error("Invalid music duration");
+    for (const field of ["fadeInMs", "fadeOutMs"] as const) bounded(music[field], 0, span / 2, field);
   });
   const orderedMusic = [...state.music].sort((a, b) => a.timelineStartMs - b.timelineStartMs);
   for (let index = 1; index < orderedMusic.length; index++) if (orderedMusic[index].timelineStartMs < musicClipEnd(state, orderedMusic[index - 1]) - 1) throw new Error("Music clips cannot overlap");
-  if (!Array.isArray(state.activity)) throw new Error("Invalid activity");
+  validateIds(state.activity, "activity");
+  if (state.activity.some((item) => !["human", "agent", "system"].includes(item.actor) || typeof item.summary !== "string" || typeof item.at !== "string" || !Number.isFinite(Date.parse(item.at)))) throw new Error("Invalid activity");
 }
 
 export function applyCommand(state: ProjectState, command: EditorCommand): ProjectState {
@@ -553,7 +625,7 @@ export function applyCommand(state: ProjectState, command: EditorCommand): Proje
       break;
     }
     case "reorder_clips": {
-      if (new Set(command.clipIds).size !== next.clips.length || command.clipIds.some((clipId) => !next.clips.some((clip) => clip.id === clipId))) throw new Error("Clip order must include every clip exactly once");
+      if (command.clipIds.length !== next.clips.length || new Set(command.clipIds).size !== next.clips.length || command.clipIds.some((clipId) => !next.clips.some((clip) => clip.id === clipId))) throw new Error("Clip order must include every clip exactly once");
       let cursor = 0;
       next.clips = command.clipIds.map((clipId) => {
         const clip = next.clips.find((item) => item.id === clipId)!;
@@ -570,20 +642,52 @@ export function applyCommand(state: ProjectState, command: EditorCommand): Proje
       const clip = next.clips[clipIndex];
       const adjusted = normalizeClip({ ...clip, ...command.patch }, state.durationMs);
       next.clips[clipIndex] = adjusted;
-      next.captions = retimeCaptionsForSpeed(next.captions, clip, adjusted.speed);
+      if (adjusted.speed !== clip.speed) {
+        const ordered = timelineClips(state).map((entry) => entry.clip);
+        const changed = new Map(next.clips.map((entry) => [entry.id, entry]));
+        let shift = 0;
+        // Speed changes ripple the following section, preserving gaps and legal transition overlaps.
+        for (let index = 0; index < ordered.length; index++) {
+          const old = ordered[index], value = changed.get(old.id)!;
+          const following = index + 1 < ordered.length ? changed.get(ordered[index + 1].id) : undefined;
+          value.timelineStartMs = old.timelineStartMs + shift;
+          const overlap = following && old.transition.type !== "cut" ? Math.min(old.transition.durationMs, clipDuration(value) / 2, clipDuration(following) / 2) : 0;
+          value.transition = overlap ? { ...old.transition, durationMs: overlap } : { type: "cut", durationMs: 0 };
+          shift += clipDuration(value) - clipDuration(old) + old.transition.durationMs - overlap;
+        }
+        const moveTime = (time: number) => {
+          const old = ordered.findLast((entry) => entry.timelineStartMs <= time);
+          if (!old) return time;
+          const value = changed.get(old.id)!;
+          const elapsed = time - old.timelineStartMs, duration = clipDuration(old);
+          return value.timelineStartMs + Math.min(elapsed, duration) * old.speed / value.speed + Math.max(0, elapsed - duration);
+        };
+        const moveText = (items: TimedText[]) => items.flatMap((item) => {
+          const startMs = moveTime(item.startMs), endMs = moveTime(item.endMs);
+          return endMs - startMs >= 50 ? [{ ...item, startMs, endMs }] : [];
+        });
+        next.captions = moveText(next.captions);
+        next.overlays = moveText(next.overlays);
+      }
       break;
     }
-    case "set_transition": { 
+    case "set_transition": {
+      if (!["cut", "crossfade", "fade-black"].includes(command.transition.type)) throw new Error("Invalid transition type");
       const clip = next.clips[clipIndex];
       const following = next.clips[clipIndex + 1];
       if (!following && command.transition.type !== "cut") throw new Error("The last clip cannot transition to another clip");
       const max = following ? Math.min(clipDuration(clip), clipDuration(following)) / 2 : 0;
       const durationMs = command.transition.type === "cut" ? 0 : clamp(command.transition.durationMs, 50, max);
-      if (following && command.transition.type !== "cut") {
+      if (following && (command.transition.type !== "cut" || clip.transition.type !== "cut")) {
         const clipEnd = clip.timelineStartMs + clipDuration(clip);
-        const currentExpectedStart = clipEnd - (clip.transition.type === "cut" ? 0 : clip.transition.durationMs);
+        const currentExpectedStart = clipEnd - clip.transition.durationMs;
         if (Math.abs(following.timelineStartMs - currentExpectedStart) > 1) throw new Error("Transitions require touching clips");
-        next.clips[clipIndex + 1] = { ...following, timelineStartMs: clipEnd - durationMs };
+        // Shift the whole following section, preserving its gaps and transitions.
+        const delta = clipEnd - durationMs - following.timelineStartMs;
+        next.clips.slice(clipIndex + 1).forEach((item) => { item.timelineStartMs += delta; });
+        for (const item of [...next.captions, ...next.overlays]) {
+          if (item.startMs >= following.timelineStartMs - delta) { item.startMs += delta; item.endMs += delta; }
+        }
       }
       next.clips[clipIndex] = { ...clip, transition: { type: command.transition.type, durationMs } };
       break;
@@ -676,16 +780,111 @@ export function applyCommand(state: ProjectState, command: EditorCommand): Proje
     case "remove_broll":
       next.broll = next.broll.filter((item) => item.id !== command.id);
       break;
+    default:
+      throw new Error("Unknown editing command");
   }
 
   if (!next.clips.length) throw new Error("Timeline must contain at least one clip");
   next.clips.sort((a, b) => a.timelineStartMs - b.timelineStartMs);
   assertTimelineLayout(next.clips);
-  next.clips = normalizeTransitions(next.clips);
+  next.clips = normalizeTransitions(next.clips.map((clip) => normalizeClip(clip, next.durationMs)));
   assertTimelineLayout(next.clips);
   next.music = next.music.map((music) => normalizeMusic(music, videoTimelineDuration(next))).sort((a, b) => a.timelineStartMs - b.timelineStartMs);
   for (let index = 1; index < next.music.length; index++) if (next.music[index].timelineStartMs < musicClipEnd(next, next.music[index - 1]) - 1) throw new Error("Music clips cannot overlap");
   next.version = state.version + 1;
   next.activity = [{ id: id(), at: new Date().toISOString(), actor: command.actor, summary }, ...state.activity].slice(0, 100);
+  // Shortening the timeline clips/removes text beyond its new end, never saves invalid cues.
+  if (timelineDuration(next) < timelineDuration(state)) {
+    const duration = timelineDuration(next);
+    const fit = (items: TimedText[]) => items.flatMap((item) => {
+      const endMs = Math.min(item.endMs, duration);
+      return endMs - item.startMs >= 50 ? [{ ...item, endMs }] : [];
+    });
+    next.captions = fit(next.captions);
+    next.overlays = fit(next.overlays);
+  }
+  validateState(next);
   return next;
+}
+
+export type EditDocument = { state: ProjectState; transcript: TranscriptWord[] };
+
+/** Reconcile fresh speech timings without erasing edited captions or needlessly replacing word IDs. */
+export function replaceTranscript(document: EditDocument, incoming: TranscriptWord[], actor: "human" | "agent" | "system"): EditDocument {
+  const previous = [...document.transcript].sort((a, b) => a.startMs - b.startMs);
+  const words = sanitizeTranscript(incoming).map((word) => ({ ...word, endMs: Math.min(word.endMs, document.state.durationMs) })).filter((word) => word.startMs < word.endMs).sort((a, b) => a.startMs - b.startMs);
+  if (!words.length && previous.length) throw new Error("Transcription returned no timed words; the previous transcript was preserved");
+  const used = new Set<string>();
+  const successors = new Map<string, string[]>();
+  const token = (word: string) => word.toLowerCase().replace(/[\p{P}\p{S}]/gu, "");
+  let cursor = 0;
+  const transcript = words.map((word) => {
+    while (cursor < previous.length && previous[cursor].startMs < word.startMs - 250) cursor++;
+    let best: TranscriptWord | undefined, score = -Infinity;
+    const overlaps: TranscriptWord[] = [];
+    // ponytail: inspect at most 64 nearby words; use an interval index if dense overlapping alignment data becomes supported.
+    for (let index = Math.max(0, cursor - 1); index < Math.min(previous.length, cursor + 64); index++) {
+      const old = previous[index];
+      if (old.startMs > word.endMs + 250) break;
+      const overlap = Math.max(0, Math.min(old.endMs, word.endMs) - Math.max(old.startMs, word.startMs));
+      const ratio = overlap / Math.min(old.endMs - old.startMs, word.endMs - word.startMs);
+      const same = token(old.word) === token(word.word) && Math.abs(old.startMs - word.startMs) <= 250;
+      if (ratio < 0.5 && !same) continue;
+      overlaps.push(old);
+      const candidate = (same ? 2 : 0) + ratio - Math.abs(old.startMs - word.startMs) / 1_000_000;
+      if (!used.has(old.id) && candidate > score) { best = old; score = candidate; }
+    }
+    const next = { ...word, id: best?.id ?? id() };
+    used.add(next.id);
+    for (const old of overlaps) { const values = successors.get(old.id) ?? []; values.push(next.id); successors.set(old.id, values); }
+    return next;
+  });
+  const claimed = new Set<string>();
+  let detached = 0;
+  const captions = document.state.captions.map((caption) => {
+    if (!caption.sourceWordIds?.length) return caption;
+    const sourceWordIds = caption.sourceWordIds.flatMap((wordId) => successors.get(wordId) ?? []).filter((wordId) => {
+      if (claimed.has(wordId)) return false;
+      claimed.add(wordId); return true;
+    });
+    if (!sourceWordIds.length) detached++;
+    return { ...caption, sourceWordIds };
+  });
+  const state = { ...document.state, version: document.state.version + 1, captions,
+    activity: [{ id: id(), at: new Date().toISOString(), actor, summary: `Transcribed video${detached ? `; ${detached} unmatched captions preserved as manual text` : ""}` }, ...document.state.activity].slice(0, 100),
+  };
+  validateState(state);
+  return { state, transcript };
+}
+
+/** Complete human/agent edit semantics, independent of React and persistence. */
+export function applyEdit(document: EditDocument, command: EditorCommand): EditDocument {
+  const { state: current, transcript } = document;
+  const caption = command.type === "split_text" && command.kind === "caption"
+    ? current.captions.find((item) => item.id === command.id) : undefined;
+  const partition = caption?.sourceWordIds?.length && command.type === "split_text"
+    ? partitionCaptionWords(current, transcript, caption, command.timelineMs) : null;
+  const state = applyCommand(current, command);
+  let nextTranscript = transcript;
+  if (partition && caption) {
+    const index = state.captions.findIndex((item) => item.id === caption.id);
+    Object.assign(state.captions[index], partition.left);
+    Object.assign(state.captions[index + 1], partition.right);
+  }
+  if (command.type === "update_caption" && command.patch.text !== undefined) {
+    const original = current.captions.find((item) => item.id === command.id);
+    const correction = original?.sourceWordIds?.length
+      ? correctTranscriptWords(transcript, original.sourceWordIds, command.patch.text) : null;
+    if (correction) {
+      nextTranscript = correction.words;
+      state.captions.find((item) => item.id === command.id)!.sourceWordIds = correction.anchorIds;
+    }
+  }
+  const structural = ["split_clip", "remove_segments", "delete_clip", "trim_clip", "reorder_clips", "move_clip", "set_transition"].includes(command.type)
+    || command.type === "adjust_clip" && command.patch.speed !== undefined;
+  if (structural && transcript.length && current.captions.some((item) => item.sourceWordIds?.length)) {
+    state.captions = reconcileAnchoredCaptions(current, state, transcript);
+  }
+  validateState(state);
+  return { state, transcript: nextTranscript };
 }

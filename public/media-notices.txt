@@ -1,0 +1,30 @@
+ROUGH//CUT — media dependency notices
+
+Mediabunny 1.55.7
+License: Mozilla Public License 2.0
+Unmodified source is included in the published package:
+https://registry.npmjs.org/mediabunny/-/mediabunny-1.55.7.tgz
+Project: https://github.com/Vanilagy/mediabunny
+
+SoundTouchJS Core 2.1.1 and interpolation-strategy-lanczos 2.1.1
+License: Mozilla Public License 2.0
+Authors include Steve 'Cutter' Blades and Olli Parviainen.
+Unmodified source:
+https://github.com/cutterbl/SoundTouchJS/tree/v2.1.1/packages/core
+https://github.com/cutterbl/SoundTouchJS/tree/v2.1.1/packages/interpolation-strategy-lanczos
+
+MPL 2.0 license text: https://www.mozilla.org/en-US/MPL/2.0/
+These libraries retain their licenses; ROUGH//CUT's own code is MIT-licensed.
+
+Inter (caption font, bundled variable TTF; semibold weight 600)
+Copyright 2020 The Inter Project Authors (https://github.com/rsms/inter)
+License: SIL Open Font License 1.1 — full license: /fonts/Inter-OFL.txt
+Font source: https://github.com/google/fonts/tree/main/ofl/inter
+
+DejaVu Sans Bold 2.37
+Copyright (c) 2003 by Bitstream, Inc. All Rights Reserved.
+Copyright (c) 2006 by Tavmjong Bah. All Rights Reserved.
+DejaVu changes are in the public domain. The font includes the original
+Bitstream Vera and Arev permission notices in its embedded metadata.
+License information: https://dejavu-fonts.github.io/License.html
+Source: https://dejavu-fonts.github.io/

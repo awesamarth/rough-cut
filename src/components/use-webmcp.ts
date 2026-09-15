@@ -1,25 +1,33 @@
 "use client";
 
 import { useEffect, useRef, type RefObject } from "react";
-import { captionsFromTranscript, type ProjectState, type TranscriptWord } from "@/lib/editor";
+import { captionsFromTranscript, excludeTranscriptFromSilences, type ProjectState, type TranscriptWord } from "@/lib/editor";
 import type { CommandInput } from "./use-editor";
 
 type Handlers = {
+  ready?: boolean;
+  mediaReady?: boolean;
   stateRef: RefObject<ProjectState | null>;
   transcriptRef: RefObject<TranscriptWord[]>;
   dispatch(command: CommandInput): ProjectState;
+  durability(): Promise<void>;
   undo(actor?: "human" | "agent"): ProjectState | null;
   redo(actor?: "human" | "agent"): ProjectState | null;
   seekTimeline(ms: number): void;
-  inspectFrame(ms?: number): { timelineMs: number; image: string };
+  inspectFrame(ms?: number): { timelineMs: number; image: string } | Promise<{ timelineMs: number; image: string }>;
   detectSilences(thresholdDb?: number, minimumMs?: number): Promise<Array<{ startMs: number; endMs: number }>>;
   transcribeVideo(actor?: "human" | "agent", expectedVersion?: number): Promise<ProjectState>;
-  exportMp4(): Promise<{ jobId: string; downloadUrl: string }>;
+  exportMp4(): Promise<unknown>;
   exportEdl(): string;
   exportSrt(): string;
   requestBackgroundMusicUpload(): { status: string; message: string };
   setStatus(status: string): void;
 };
+
+export function boundedInteger(value: unknown, minimum: number, maximum: number, name: string) {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < minimum || value > maximum) throw new Error(`${name} must be an integer between ${minimum} and ${maximum}`);
+  return value;
+}
 
 const objectSchema = (properties: Record<string, unknown>, required: string[] = []) => ({ type: "object", properties, required, additionalProperties: false });
 const string = (description: string) => ({ type: "string", description });
@@ -58,8 +66,10 @@ export function compactMutationResult(before: ProjectState, next: ProjectState) 
 export function useWebMCP(handlers: Handlers) {
   const current = useRef(handlers);
   current.current = handlers;
+  const { ready, mediaReady } = handlers;
 
   useEffect(() => {
+    if (ready === false) { current.current.setStatus("Preparing"); return; }
     const context = document.modelContext;
     if (!context?.registerTool) { current.current.setStatus("Unavailable"); return; }
     const controller = new AbortController();
@@ -83,7 +93,12 @@ export function useWebMCP(handlers: Handlers) {
       const currentVersion = state().version;
       if (expected !== currentVersion) throw new Error(`STALE_VERSION:${currentVersion}`);
     };
-    const mutate = (command: CommandInput) => { const before = state(); return compactMutationResult(before, current.current.dispatch(command)); };
+    const mutate = async (command: CommandInput) => {
+      const before = state();
+      const next = current.current.dispatch(command);
+      await current.current.durability();
+      return compactMutationResult(before, next);
+    };
     const tools: WebMCPTool[] = [
       {
         name: "get_project_state", title: "Inspect active video project", description: "Read the active project version, duration, ordered clips, transitions, protected ranges, captions, caption style, overlays, background music and B-roll markers. Call before editing.",
@@ -93,7 +108,7 @@ export function useWebMCP(handlers: Handlers) {
       {
         name: "get_activity", title: "Read project activity", description: "Read a paginated page of recent human, agent and system project activity.",
         inputSchema: objectSchema({ offset: { type: "integer", minimum: 0 }, limit: { type: "integer", minimum: 1, maximum: 100 } }), annotations: { readOnlyHint: true },
-        async execute(input) { const activity = state().activity; const offset = typeof input.offset === "number" && Number.isInteger(input.offset) ? Math.max(0, input.offset) : 0; const limit = typeof input.limit === "number" && Number.isInteger(input.limit) ? Math.min(100, Math.max(1, input.limit)) : 20; return { total: activity.length, offset, activity: activity.slice(offset, offset + limit) }; },
+        async execute(input) { const activity = state().activity; const offset = boundedInteger(input.offset ?? 0, 0, Number.MAX_SAFE_INTEGER, "offset"); const limit = boundedInteger(input.limit ?? 20, 1, 100, "limit"); return { total: activity.length, offset, activity: activity.slice(offset, offset + limit) }; },
       },
       {
         name: "rename_project", title: "Rename project", description: "Change the persisted project name used by the editor and default exports.",
@@ -103,27 +118,33 @@ export function useWebMCP(handlers: Handlers) {
       {
         name: "get_transcript", title: "Read transcript", description: "Read a page of word-timestamped transcript for the active source video.",
         inputSchema: objectSchema({ offset: number("Zero-based word offset"), limit: { type: "integer", minimum: 1, maximum: 500, description: "Words to return" } }), annotations: { readOnlyHint: true },
-        async execute(input) { const words = current.current.transcriptRef.current; const offset = typeof input.offset === "number" ? input.offset : 0; const limit = typeof input.limit === "number" ? Math.min(500, input.limit) : 200; return { total: words.length, offset, words: words.slice(offset, offset + limit) }; },
+        async execute(input) { const words = current.current.transcriptRef.current; const offset = boundedInteger(input.offset ?? 0, 0, Number.MAX_SAFE_INTEGER, "offset"); const limit = boundedInteger(input.limit ?? 200, 1, 500, "limit"); return { total: words.length, offset, words: words.slice(offset, offset + limit) }; },
       },
       {
         name: "search_transcript", title: "Search transcript", description: "Find transcript words matching text and return surrounding word-timestamped context.",
         inputSchema: objectSchema({ query: string("Text to find"), limit: { type: "integer", minimum: 1, maximum: 50 } }, ["query"]), annotations: { readOnlyHint: true },
-        async execute(input) { const query = asString(input.query, "query").toLowerCase(); const words = current.current.transcriptRef.current; const indexes = words.map((word, index) => word.word.toLowerCase().includes(query) ? index : -1).filter((index) => index >= 0).slice(0, typeof input.limit === "number" ? input.limit : 20); return indexes.map((index) => ({ match: words[index], context: words.slice(Math.max(0, index - 6), index + 7) })); },
+        async execute(input) { const query = asString(input.query, "query").toLowerCase(); const words = current.current.transcriptRef.current; const indexes = words.map((word, index) => word.word.toLowerCase().includes(query) ? index : -1).filter((index) => index >= 0).slice(0, boundedInteger(input.limit ?? 20, 1, 50, "limit")); return indexes.map((index) => ({ match: words[index], context: words.slice(Math.max(0, index - 6), index + 7) })); },
       },
       {
         name: "inspect_frame", title: "Inspect exact video frame", description: "Seek the visible editor to a timeline time and return the displayed frame as JPEG data with its exact time.",
         inputSchema: objectSchema({ timeline_ms: number("Timeline position in milliseconds") }), annotations: { readOnlyHint: true },
-        async execute(input) { const target = typeof input.timeline_ms === "number" ? input.timeline_ms : undefined; if (target !== undefined) { current.current.seekTimeline(target); await new Promise((resolve) => setTimeout(resolve, 150)); } return current.current.inspectFrame(); },
+        async execute(input) { const target = input.timeline_ms === undefined ? undefined : asNumber(input.timeline_ms, "timeline_ms"); return await current.current.inspectFrame(target); },
       },
       {
-        name: "detect_silences", title: "Detect silent audio ranges", description: "Analyze source audio with FFmpeg and return candidate silent source ranges. This does not edit the timeline.",
-        inputSchema: objectSchema({ threshold_db: { type: "number", minimum: -60, maximum: -10 }, minimum_ms: { type: "number", minimum: 100, maximum: 5000 } }), annotations: { readOnlyHint: true },
-        async execute(input) { return { ranges: await current.current.detectSilences(typeof input.threshold_db === "number" ? input.threshold_db : -35, typeof input.minimum_ms === "number" ? input.minimum_ms : 500) }; },
+        name: "detect_silences", title: "Detect silent audio ranges", description: "Analyze source audio locally and return silent source ranges cross-checked against transcript speech, with 200 ms speech padding by default. Does not edit the timeline or start cloud compute.",
+        inputSchema: objectSchema({ threshold_db: { type: "number", minimum: -60, maximum: -10 }, minimum_ms: { type: "number", minimum: 100, maximum: 5000 }, padding_ms: { type: "number", minimum: 0, maximum: 500 } }), annotations: { readOnlyHint: true },
+        async execute(input) {
+          const minimum = input.minimum_ms === undefined ? 500 : asNumber(input.minimum_ms, "minimum_ms");
+          const padding = input.padding_ms === undefined ? 200 : asNumber(input.padding_ms, "padding_ms");
+          if (padding < 0 || padding > 500) throw new Error("padding_ms must be between 0 and 500");
+          const ranges = await current.current.detectSilences(input.threshold_db === undefined ? -35 : asNumber(input.threshold_db, "threshold_db"), minimum);
+          return { ranges: excludeTranscriptFromSilences(ranges, current.current.transcriptRef.current, padding, minimum), speech_padding_ms: padding };
+        },
       },
       {
         name: "transcribe_video", description: "Transcribe the source video with Cloudflare Whisper and save word timestamps. This may take several minutes.",
         inputSchema: mutationSchema({}),
-        async execute(input) { assertVersion(input); const before = state(); const next = await current.current.transcribeVideo("agent", asNumber(input.expected_version, "expected_version")); return { ...compactMutationResult(before, next), transcript: { word_count: current.current.transcriptRef.current.length } }; },
+        async execute(input) { assertVersion(input); const before = state(); const next = await current.current.transcribeVideo("agent", asNumber(input.expected_version, "expected_version")); await current.current.durability(); return { ...compactMutationResult(before, next), transcript: { word_count: current.current.transcriptRef.current.length } }; },
       },
       {
         name: "split_clip", description: "Split one timeline clip at an exact source-media time.",
@@ -253,14 +274,14 @@ export function useWebMCP(handlers: Handlers) {
         inputSchema: mutationSchema({ marker_id: string("B-roll marker ID") }, ["marker_id"]), annotations: { destructiveHint: true },
         async execute(input) { assertVersion(input); return mutate({ type: "remove_broll", actor: "agent", id: asString(input.marker_id, "marker_id") }); },
       },
-      { name: "undo", description: "Undo the latest reversible timeline edit.", inputSchema: mutationSchema({}), async execute(input) { assertVersion(input); const before = state(); const next = current.current.undo("agent"); return next ? { ...compactMutationResult(before, next), reread_recommended: true } : { project_version: before.version, unchanged: true }; } },
-      { name: "redo", description: "Redo the latest undone timeline edit.", inputSchema: mutationSchema({}), async execute(input) { assertVersion(input); const before = state(); const next = current.current.redo("agent"); return next ? { ...compactMutationResult(before, next), reread_recommended: true } : { project_version: before.version, unchanged: true }; } },
+      { name: "undo", description: "Undo the latest reversible timeline edit.", inputSchema: mutationSchema({}), async execute(input) { assertVersion(input); const before = state(); const next = current.current.undo("agent"); await current.current.durability(); return next ? { ...compactMutationResult(before, next), reread_recommended: true } : { project_version: before.version, unchanged: true }; } },
+      { name: "redo", description: "Redo the latest undone timeline edit.", inputSchema: mutationSchema({}), async execute(input) { assertVersion(input); const before = state(); const next = current.current.redo("agent"); await current.current.durability(); return next ? { ...compactMutationResult(before, next), reread_recommended: true } : { project_version: before.version, unchanged: true }; } },
       { name: "export_mp4", description: "Render the current project as an MP4. When rendering completes, a highlighted Download MP4 button appears in the editor; ask the human to click it because browser security requires a trusted user gesture to save the file.", async execute() { return current.current.exportMp4(); } },
       { name: "export_edl", description: "Generate and download a CMX3600-style EDL for the current cut.", async execute() { return { edl: current.current.exportEdl() }; } },
       { name: "export_srt", description: "Generate and download an SRT subtitle file from the current captions.", async execute() { return { srt: current.current.exportSrt() }; } },
     ];
 
-    Promise.all(tools.map((tool) => context.registerTool(tool, { signal: controller.signal })))
+    Promise.all(tools.filter((tool) => mediaReady !== false || !["inspect_frame", "detect_silences", "transcribe_video", "export_mp4"].includes(tool.name)).map((tool) => context.registerTool(tool, { signal: controller.signal })))
       .then(() => { if (!controller.signal.aborted) current.current.setStatus("Ready"); })
       .catch((error) => {
         if (error instanceof DOMException && error.name === "AbortError") return;
@@ -268,5 +289,5 @@ export function useWebMCP(handlers: Handlers) {
         current.current.setStatus("Error");
       });
     return () => controller.abort();
-  }, []);
+  }, [ready, mediaReady]);
 }

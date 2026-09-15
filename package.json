@@ -9,6 +9,7 @@
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
+    "test:cloud": "bun build src/lib/cloud-outputs.test.ts --target=node --packages=external --outfile=node_modules/.cache/rough-cut-cloud-check.mjs && node node_modules/.cache/rough-cut-cloud-check.mjs",
     "db:migrate:local": "wrangler d1 migrations apply rough-cut-db --local",
     "db:migrate:remote": "wrangler d1 migrations apply rough-cut-db --remote",
     "media:up": "docker compose up --build",
@@ -22,7 +23,9 @@
   "dependencies": {
     "@cloudflare/containers": "^0.3.7",
     "@opennextjs/cloudflare": "^1.20.4",
+    "@soundtouchjs/core": "^2.1.1",
     "lucide-react": "^1.37.0",
+    "mediabunny": "^1.55.7",
     "next": "16.3.3",
     "react": "19.2.8",
     "react-dom": "19.2.8"

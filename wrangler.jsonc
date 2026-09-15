@@ -24,6 +24,11 @@
     {
       "binding": "MEDIA",
       "bucket_name": "rough-cut-media"
+    },
+    {
+      "binding": "OUTPUTS",
+      "bucket_name": "rough-cut-outputs",
+      "remote": true
     }
   ],
   "d1_databases": [
@@ -39,12 +44,19 @@
     "remote": true
   },
   "vars": {
-    "MEDIA_WORKER_URL": "https://rough-cut-media.samarthsaxena1672003.workers.dev"
+    "MEDIA_WORKER_URL": "https://rough-cut-media.samarthsaxena1672003.workers.dev",
+    "CLOUD_EXPORTS_DAILY_LIMIT": "0",
+    "CLOUD_OUTPUT_DAILY_MIB": "8192",
+    "CLOUD_OUTPUT_LIFECYCLE_READY": "1"
   },
   "images": {
     "binding": "IMAGES"
   },
   "observability": {
-    "enabled": true
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "invocation_logs": false
+    }
   }
 }

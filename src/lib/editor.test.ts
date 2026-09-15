@@ -8,9 +8,9 @@ describe("editing commands", () => {
       { id: "cut", word: "Cut", startMs: 1250, endMs: 1450 },
       { id: "other", word: "works", startMs: 1500, endMs: 1800 },
     ], ["rough", "cut"], "ROUGH//CUT")).toEqual({
-      anchorId: "rough",
+      anchorIds: ["rough"],
       words: [
-        { id: "rough", word: "ROUGH//CUT", startMs: 1000, endMs: 1450 },
+        { id: "rough", word: "ROUGH//CUT", startMs: 1000, endMs: 1450, confidence: 0 },
         { id: "other", word: "works", startMs: 1500, endMs: 1800 },
       ],
     });

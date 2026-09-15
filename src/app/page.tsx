@@ -1,3 +1,4 @@
+import { ExportLibrary } from "@/components/export-library";
 import { ProjectLibrary } from "@/components/project-library";
 import { Uploader } from "@/components/uploader";
 
@@ -11,11 +12,12 @@ export default function Home() {
       <section className="m-auto w-[min(900px,100%)] py-[70px]">
         <p className="text-xs font-extrabold tracking-[.2em] text-[var(--lime)] uppercase">Agent-native video editing</p>
         <h1 className="my-4 mb-5 max-w-[800px] text-[clamp(58px,8vw,108px)] leading-[.86] tracking-[-.075em]">Your taste.<br /><em className="font-normal not-italic text-[#aeb2b9]">The agent&apos;s hands.</em></h1>
-        <p className="max-w-[610px] text-[clamp(16px,2vw,20px)] leading-[1.55] text-[#a7abb3]">Upload a real video, then edit alongside any WebMCP agent, both of you using the same precise timeline tools.</p>
+        <p className="max-w-[610px] text-[clamp(16px,2vw,20px)] leading-[1.55] text-[#a7abb3]">Open a local video, then edit alongside any WebMCP agent, both of you using the same precise timeline tools.</p>
         <Uploader />
         <ProjectLibrary />
+        <details className="mt-6 rounded-xl border border-[var(--line)] p-3"><summary className="cursor-pointer text-sm">Saved exports · recover or free browser space</summary><ExportLibrary /></details>
       </section>
-      <footer className="flex gap-6 text-[10px] tracking-[.13em] text-[#737984] uppercase max-[900px]:flex-wrap"><span>Non-destructive</span><span>Human-first</span><span>Open tooling</span></footer>
+      <footer className="flex gap-6 text-[10px] tracking-[.13em] text-[#737984] uppercase max-[900px]:flex-wrap"><span>Non-destructive</span><span>Human-first</span><span>Open tooling</span><a className="underline" href="/media-notices.txt">Media licenses &amp; source</a></footer>
     </main>
   );
 }

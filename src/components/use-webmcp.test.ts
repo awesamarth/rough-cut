@@ -1,6 +1,11 @@
 import { expect, test } from "bun:test";
 import { applyCommand, createProjectState } from "@/lib/editor";
-import { compactMutationResult } from "./use-webmcp";
+import { boundedInteger, compactMutationResult } from "./use-webmcp";
+
+test("tool pagination rejects values that would bypass bounded output", () => {
+  for (const value of [-1, 0, 501, Infinity, NaN, 1.5, "500"]) expect(() => boundedInteger(value, 1, 500, "limit")).toThrow();
+  expect(boundedInteger(500, 1, 500, "limit")).toBe(500);
+});
 
 const projectId = "00000000-0000-4000-8000-000000000000";
 
