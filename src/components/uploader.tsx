@@ -2,86 +2,87 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { AUTO_TRANSCRIBE_KEY, queueAutoTranscription } from "@/lib/auto-transcription";
 import { rememberProject } from "@/lib/local-projects";
+import { createLocalProject, importLocalProject } from "@/lib/local-store";
+import { inspectMediaSource } from "@/lib/codec-support";
 
 export function Uploader() {
   const router = useRouter();
-  const inputRef = useRef<HTMLInputElement>(null);
-  const chooseButtonRef = useRef<HTMLButtonElement>(null);
-  const [dragging, setDragging] = useState(false);
-  const [progress, setProgress] = useState<number | null>(null);
+  const input = useRef<HTMLInputElement>(null);
+  const backupInput = useRef<HTMLInputElement>(null);
+  const choose = useRef<HTMLButtonElement>(null);
+  const busy = useRef(false);
+  const opening = useRef<AbortController | null>(null);
+  useEffect(() => () => opening.current?.abort(), []);
+  const [working, setWorking] = useState(false);
+  const [requested, setRequested] = useState(false);
   const [error, setError] = useState("");
-  const [uploadRequested, setUploadRequested] = useState(false);
+  const [dragging, setDragging] = useState(false);
+  const [autoTranscribe, setAutoTranscribe] = useState(false);
+  useEffect(() => {
+    try { setAutoTranscribe(localStorage.getItem(AUTO_TRANSCRIBE_KEY) === "true"); } catch { /* Storage unavailable: keep opt-in off. */ }
+  }, []);
 
   useEffect(() => {
     const context = document.modelContext;
     if (!context?.registerTool) return;
     const controller = new AbortController();
     void context.registerTool({
-      name: "request_video_upload",
-      title: "Request source video upload",
-      description: "Focus and highlight the source-video upload control so the human can click it and choose one local video. Returns human_action_required because browser security requires a user gesture.",
+      name: "request_video_upload", title: "Request local source video",
+      description: "Highlight the human-operated local video picker. The file stays on the device; this does not upload it. Ask the human to choose a file.",
       inputSchema: { type: "object", properties: {}, additionalProperties: false },
-      async execute() {
-        if (!inputRef.current || inputRef.current.disabled) return { status: "unavailable", message: "An upload is already in progress." };
-        setUploadRequested(true);
-        requestAnimationFrame(() => { chooseButtonRef.current?.scrollIntoView({ behavior: "smooth", block: "center" }); chooseButtonRef.current?.focus({ preventScroll: true }); });
-        return { status: "human_action_required", message: "Choose video is focused and highlighted. Ask the human to click it and select a local video; upload begins automatically after selection." };
+      execute() {
+        if (busy.current) return { status: "unavailable", message: "A file is already opening." };
+        setRequested(true); choose.current?.focus();
+        return { status: "human_action_required", message: "Choose video is highlighted. Ask the human to select a local source file." };
       },
-    }, { signal: controller.signal }).catch((cause) => {
-      if (cause instanceof DOMException && cause.name === "AbortError") return;
-      console.error("Landing WebMCP registration failed", cause);
-    });
+    }, { signal: controller.signal }).catch((cause) => { if (!controller.signal.aborted) setError(String(cause)); });
     return () => controller.abort();
   }, []);
 
-  async function upload(file: File) {
-    setUploadRequested(false);
-    if (!file.type.startsWith("video/")) return setError("Choose a video file.");
-    setError("");
-    setProgress(0);
-    let uploadId = "";
+  async function open(file: File, backup = false) {
+    if (busy.current) return;
+    const controller = new AbortController();
+    opening.current = controller;
+    busy.current = true; setWorking(true); setError(""); setRequested(false);
     try {
-      const start = await fetch("/api/uploads", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: file.name, type: file.type, size: file.size }) });
-      const session = await start.json() as { uploadId: string; projectId: string; chunkSize: number; error?: string };
-      if (!start.ok) throw new Error(session.error || "Could not start upload");
-      uploadId = session.uploadId;
-      const parts: Array<{ partNumber: number; etag: string }> = [];
-      const partCount = Math.ceil(file.size / session.chunkSize);
-      for (let index = 0; index < partCount; index++) {
-        const response = await fetch(`/api/uploads/${uploadId}/parts/${index + 1}`, { method: "PUT", body: file.slice(index * session.chunkSize, Math.min(file.size, (index + 1) * session.chunkSize)) });
-        const part = await response.json() as { partNumber: number; etag: string; error?: string };
-        if (!response.ok) throw new Error(part.error || `Part ${index + 1} failed`);
-        parts.push(part);
-        setProgress(Math.round(((index + 1) / (partCount + 1)) * 100));
+      let id: string;
+      if (backup) {
+        if (file.size > 32 * 1024 * 1024) throw new Error("Project backup is too large (maximum 32 MB)");
+        const text = await file.text();
+        controller.signal.throwIfAborted();
+        id = await importLocalProject(JSON.parse(text));
+      } else {
+        const { durationMs } = await inspectMediaSource(file, "source", controller.signal);
+        controller.signal.throwIfAborted();
+        id = await createLocalProject(file, durationMs);
       }
-      const complete = await fetch(`/api/uploads/${uploadId}/complete`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ parts }) });
-      const result = await complete.json() as { projectId?: string; error?: string };
-      if (!complete.ok || !result.projectId) throw new Error(result.error || "Could not finish upload");
-      setProgress(100);
-      rememberProject(result.projectId);
-      router.push(`/editor/${result.projectId}`);
-    } catch (cause) {
-      if (uploadId) void fetch(`/api/uploads/${uploadId}/complete`, { method: "DELETE" });
-      setError(cause instanceof Error ? cause.message : "Upload failed");
-      setProgress(null);
-    }
+      controller.signal.throwIfAborted();
+      if (!backup && autoTranscribe) queueAutoTranscription(id);
+      rememberProject(id);
+      router.push(`/editor/${id}`);
+    } catch (cause) { if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : "Could not open file"); }
+    finally { busy.current = false; if (!controller.signal.aborted) setWorking(false); }
   }
 
-  return (
-    <div
-      className={`mt-10.5 flex min-h-[230px] flex-col items-center justify-center rounded-[18px] border border-dashed p-[30px] text-center transition duration-200 ${dragging ? "scale-[1.01] border-[var(--lime)] bg-[#1b2114]" : "border-[#3a404a] bg-[#121419cc]"}`}
-      onDragOver={(event) => { event.preventDefault(); setDragging(true); }}
-      onDragLeave={() => setDragging(false)}
-      onDrop={(event) => { event.preventDefault(); setDragging(false); const file = event.dataTransfer.files[0]; if (file) void upload(file); }}
-    >
-      <input ref={inputRef} hidden disabled={progress !== null} type="file" accept="video/*" onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ""; if (file) { setUploadRequested(false); void upload(file); } }} />
-      <div className="grid size-11 place-items-center rounded-xl bg-[#252a31] text-2xl text-[var(--lime)]" aria-hidden>↗</div>
-      <h2 className="mt-2 mb-1.25 text-[19px]">{progress === null ? "Drop a video here" : progress === 100 ? "Opening editor…" : "Uploading source…"}</h2>
-      <p className="mt-0 mb-[18px] text-[13px] text-[var(--muted)]">{progress === null ? "MP4, WebM, MOV and other video formats" : `${progress}% uploaded`}</p>
-      {progress !== null && <div className="h-1.25 w-[min(400px,90%)] overflow-hidden rounded-[9px] bg-[#292d33]" role="progressbar" aria-label="Upload progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}><span className="block h-full bg-[var(--lime)] transition-[width] duration-250" style={{ width: `${progress}%` }} /></div>}
-      {progress === null && <button ref={chooseButtonRef} className={`cursor-pointer rounded-[10px] border-0 bg-[var(--lime)] px-5 py-[13px] font-extrabold text-[#10120d] shadow-[0_8px_30px_#d9ff6324] hover:bg-[#e5ff93] ${uploadRequested ? "animate-pulse ring-2 ring-white ring-offset-2 ring-offset-[#121419] motion-reduce:animate-none" : ""}`} onClick={() => { setUploadRequested(false); inputRef.current?.click(); }}>Choose video</button>}
-      {error && <p className="mt-4 text-[#ff9781]" role="alert">{error}</p>}
+  return <><div className={`mt-10 flex min-h-[230px] flex-col items-center justify-center rounded-2xl border border-dashed p-8 text-center ${dragging ? "border-[var(--lime)] bg-[#1b2114]" : "border-[#3a404a] bg-[#121419cc]"}`}
+    onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)}
+    onDrop={(event) => { event.preventDefault(); setDragging(false); const file = event.dataTransfer.files[0]; if (file) void open(file); }}>
+    <input ref={input} hidden disabled={working} type="file" accept="video/*" onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void open(file); }} />
+    <h2 className="mb-2 text-xl">{working ? "Opening locally…" : "Drop a video here"}</h2>
+    <p className="mb-5 text-sm text-[var(--muted)]">No account or upload required. Your original media stays on this device.</p>
+    <button ref={choose} disabled={working} className={`cursor-pointer rounded-lg bg-[var(--lime)] px-5 py-3 font-bold text-[#10120d] ${requested ? "ring-2 ring-white ring-offset-2 ring-offset-[#121419]" : ""}`} onClick={() => input.current?.click()}>Choose video</button>
+    <label className="mt-4 flex max-w-full items-start gap-2 text-left text-xs text-[var(--muted)]"><input className="mt-0.5" type="checkbox" checked={autoTranscribe} disabled={working} onChange={(event) => {
+      const enabled = event.target.checked; setAutoTranscribe(enabled);
+      try { localStorage.setItem(AUTO_TRANSCRIBE_KEY, String(enabled)); }
+      catch { setError("Choice applies for now, but could not be remembered on this device."); }
+    }} /><span>Automatically transcribe new videos using Workers AI. Audio is sent to the cloud.</span></label>
+  </div>
+    <div className="mt-4 flex justify-end">
+      <input ref={backupInput} hidden type="file" accept="application/json,.json" disabled={working} onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void open(file, true); }} />
+      <button type="button" disabled={working} className="cursor-pointer rounded-lg border border-[var(--line)] bg-[var(--panel-2)] px-4 py-2.5 text-sm text-[var(--text)] hover:border-[var(--lime)] disabled:cursor-not-allowed disabled:opacity-40" onClick={() => backupInput.current?.click()}>Import project backup</button>
     </div>
-  );
+    {error && <p role="alert" className="mt-4 text-sm text-[#ff9781]">{error}</p>}
+  </>;
 }

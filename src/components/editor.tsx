@@ -1,12 +1,20 @@
 "use client";
+import { useTimelineSnapping } from "./use-timeline-snapping";
+import { blocksEditorShortcuts } from "@/lib/editor-shortcuts";
+import { useConfirmation } from "./modal";
 
 import Link from "next/link";
 import { Download, Link2, Magnet, Maximize2, Minimize2, RotateCcw, Unlink2, Volume2, VolumeX } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { captionsFromTranscript, clipDuration, excludeTranscriptFromSilences, exportSrt, musicClipEnd, timelineClips, timelineDuration, timelineToSource, type Clip, type MusicClip, type ProjectState, type TimedText, type TranscriptWord } from "@/lib/editor";
+import { bladeSplitCommand, captionsFromTranscript, clipDuration, excludeTranscriptFromSilences, exportSrt, musicClipEnd, timelineClips, timelineDuration, timelineToSource, type Clip, type MusicClip, type ProjectState, type TimedText, type TranscriptWord } from "@/lib/editor";
 import { exportEdl } from "@/lib/edl";
 import { type CommandInput, useEditor } from "./use-editor";
 import { useWebMCP } from "./use-webmcp";
+import { analyzeAudio, prepareAudioChunk } from "@/lib/browser-audio";
+import { silenceCandidates, waveformPeaks, type AudioAnalysis } from "@/lib/audio-analysis";
+import { useMediaAssets } from "./use-media-assets";
+import { addLocalMusic, getLocalProject } from "@/lib/local-store";
+import { inspectMediaSource } from "@/lib/codec-support";
 
 const MEDIA_URL = "/api/media";
 type SaveFileHandle = { createWritable(): Promise<WritableStream<Uint8Array>> };
@@ -35,7 +43,9 @@ function downloadText(name: string, text: string, type = "text/plain") {
 
 export function Editor({ projectId }: { projectId: string }) {
   const editor = useEditor(projectId);
-  const { project, state, transcript, dispatch, previewClip, initialize, undo, redo, saveTranscript, saving, lastSavedAt, error, setError, canUndo, canRedo } = editor;
+  const { confirm, confirmation } = useConfirmation();
+  const { project, state, transcript, dispatch, previewClip, initialize, undo, redo, saveTranscript, saving, lastSavedAt, error, setError, canUndo, canRedo, durability } = editor;
+  const media = useMediaAssets(projectId, project ? !!project.local : undefined, state?.music.map((item) => item.assetId) ?? []);
   const previewStageRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const nextVideoRef = useRef<HTMLVideoElement>(null);
@@ -48,8 +58,9 @@ export function Editor({ projectId }: { projectId: string }) {
   const reconciledClipId = useRef<string | null>(null);
   const gapFrame = useRef<number | null>(null);
   const exportResetTimer = useRef<number | null>(null);
+  const cloudExportRunning = useRef(false);
   const readyDownloadRef = useRef<HTMLButtonElement>(null);
-  const autoTranscribeStarted = useRef(false);
+  const transcriptionController = useRef<AbortController | null>(null);
   const [selectedClipId, setSelectedClipId] = useState("");
   const activeIndexRef = useRef(-1);
   const [activeIndex, setActiveIndex] = useState(-1);
@@ -70,11 +81,11 @@ export function Editor({ projectId }: { projectId: string }) {
   const [autoTranscriptionStatus, setAutoTranscriptionStatus] = useState("");
   const [musicUploadRequested, setMusicUploadRequested] = useState(false);
   const [frame, setFrame] = useState<string | null>(null);
+  const sourceAnalysis = useRef<Promise<AudioAnalysis> | null>(null);
   const [waveform, setWaveform] = useState<number[]>([]);
   const [musicWaveform, setMusicWaveform] = useState<number[]>([]);
   const [timelineHeight, setTimelineHeight] = useState(265);
-  const [snapEnabled, setSnapEnabled] = useState(true);
-  const [optionHeld, setOptionHeld] = useState(false);
+  const snapping = useTimelineSnapping();
   const [lowerHeight, setLowerHeight] = useState(210);
   const [selectedText, setSelectedText] = useState<{ kind: "caption" | "overlay"; id: string } | null>(null);
   const [selectedMusicId, setSelectedMusicId] = useState("");
@@ -82,7 +93,10 @@ export function Editor({ projectId }: { projectId: string }) {
   const [textPreview, setTextPreview] = useState<{ kind: "caption" | "overlay"; id: string; patch: Partial<TimedText> } | null>(null);
   const [captionOpacityPreview, setCaptionOpacityPreview] = useState<number | null>(null);
 
-  useEffect(() => () => { if (exportResetTimer.current !== null) window.clearTimeout(exportResetTimer.current); }, []);
+  useEffect(() => () => {
+    if (exportResetTimer.current !== null) window.clearTimeout(exportResetTimer.current);
+    transcriptionController.current?.abort();
+  }, []);
 
   const startResize = (kind: "preview" | "timeline", event: React.PointerEvent<HTMLButtonElement>) => {
     event.preventDefault();
@@ -109,32 +123,26 @@ export function Editor({ projectId }: { projectId: string }) {
 
   useEffect(() => {
     const controller = new AbortController();
-    fetch(`${MEDIA_URL}/waveform`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ projectId }), signal: controller.signal })
-      .then(async (response) => { const result = await response.json() as { peaks?: number[] }; if (response.ok && result.peaks) setWaveform(result.peaks); })
-      .catch(() => undefined);
-    return () => controller.abort();
-  }, [projectId]);
+    if (!media.source) return;
+    const work = analyzeAudio(media.source, `${projectId}:source`, controller.signal);
+    sourceAnalysis.current = work;
+    void work.then((result) => { if (!controller.signal.aborted) setWaveform(waveformPeaks(result)); })
+      .catch((cause) => { if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : "Local audio analysis failed"); });
+    return () => { controller.abort(); sourceAnalysis.current = null; };
+  }, [projectId, setError, media.source]);
 
   const musicId = state?.music[0]?.assetId;
+  const musicSource = musicId ? media.music[musicId] : undefined;
   useEffect(() => {
-    if (!musicId) { setMusicWaveform([]); return; }
+    if (!musicId || !musicSource) { setMusicWaveform([]); return; }
     const controller = new AbortController();
-    fetch(`${MEDIA_URL}/waveform`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ projectId, asset: "music", assetVersion: musicId }), signal: controller.signal })
-      .then(async (response) => { const result = await response.json() as { peaks?: number[] }; if (response.ok && result.peaks) setMusicWaveform(result.peaks); })
-      .catch(() => undefined);
+    void analyzeAudio(musicSource, `${projectId}:music:${musicId}`, controller.signal)
+      .then((result) => { if (!controller.signal.aborted) setMusicWaveform(waveformPeaks(result)); })
+      .catch((cause) => { if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : "Local music analysis failed"); });
     return () => controller.abort();
-  }, [musicId, projectId]);
+  }, [musicId, musicSource, projectId, setError]);
 
-  useEffect(() => {
-    const key = (event: KeyboardEvent) => { if (event.key === "Alt") setOptionHeld(event.type === "keydown"); };
-    const release = () => setOptionHeld(false);
-    window.addEventListener("keydown", key);
-    window.addEventListener("keyup", key);
-    window.addEventListener("blur", release);
-    return () => { window.removeEventListener("keydown", key); window.removeEventListener("keyup", key); window.removeEventListener("blur", release); };
-  }, []);
-
-  const effectiveSnapEnabled = optionHeld ? !snapEnabled : snapEnabled;
+  const effectiveSnapEnabled = snapping.enabled;
   const totalMs = state ? timelineDuration(state) : 0;
   const selectedClip = state?.clips.find((clip) => clip.id === selectedClipId);
   const selectedTextItem = selectedText && state ? (selectedText.kind === "caption" ? state.captions : state.overlays).find((item) => item.id === selectedText.id) : undefined;
@@ -334,7 +342,12 @@ export function Editor({ projectId }: { projectId: string }) {
       clip.fadeInMs ? 1 - clipElapsedMs / clip.fadeInMs : 0,
       clip.fadeOutMs ? 1 - (durationMs - clipElapsedMs) / clip.fadeOutMs : 0,
     );
-    if (edgeFade > 0) setBlackOpacity((current) => Math.max(current, Math.min(1, edgeFade)));
+    const transitionBlack = following && clip.transition.type === "fade-black" && transitionMs > 0 && remainingMs <= transitionMs
+      ? 1 - Math.abs(Math.max(0, Math.min(1, 1 - remainingMs / transitionMs)) * 2 - 1) : 0;
+    setBlackOpacity(Math.max(transitionBlack, Math.max(0, Math.min(1, edgeFade))));
+    if (!(following && clip.transition.type === "crossfade" && remainingMs <= transitionMs)) {
+      setMediaGain(video, (clip.muted ? 0 : clip.volume) * (1 - Math.max(0, Math.min(1, edgeFade))));
+    }
 
     if (sourceMs >= clip.sourceOutMs - 15) {
       if (!following) { video.pause(); if (entry.endMs < totalMs - 1) startGapPlayback(entry.endMs); else setPlayheadMs(totalMs); return; }
@@ -391,6 +404,7 @@ export function Editor({ projectId }: { projectId: string }) {
 
   useEffect(() => {
     const shortcuts = (event: KeyboardEvent) => {
+      if (blocksEditorShortcuts(event)) return;
       const target = event.target as HTMLElement | null;
       const input = target instanceof HTMLInputElement ? target : null;
       const textField = !!target?.closest("textarea, [contenteditable='true']") || !!input && ["text", "search", "password", "email", "url", "tel"].includes(input.type);
@@ -398,8 +412,8 @@ export function Editor({ projectId }: { projectId: string }) {
       const blur = () => (document.activeElement as HTMLElement | null)?.blur();
       if (event.code === "Space" && !event.metaKey && !event.ctrlKey && !event.altKey) {
         if (textField) return;
-        event.preventDefault(); blur();
-        if (!event.repeat) togglePlayback();
+        event.preventDefault(); event.stopPropagation();
+        if (!event.repeat) { blur(); togglePlayback(); }
         return;
       }
       if ((event.key === "Backspace" || event.key === "Delete") && !event.metaKey && !event.ctrlKey && !event.altKey) {
@@ -424,8 +438,8 @@ export function Editor({ projectId }: { projectId: string }) {
         if (!event.repeat) redo();
       }
     };
-    window.addEventListener("keydown", shortcuts);
-    return () => window.removeEventListener("keydown", shortcuts);
+    window.addEventListener("keydown", shortcuts, true);
+    return () => window.removeEventListener("keydown", shortcuts, true);
   }, [dispatch, redo, selectedClip, selectedMusicId, selectedText, setError, togglePlayback, undo]);
 
   const splitAtPlayhead = () => {
@@ -457,6 +471,11 @@ export function Editor({ projectId }: { projectId: string }) {
   const exportMp4 = useCallback(async (baseName?: string, fileHandle?: SaveFileHandle) => {
     const current = editor.stateRef.current;
     if (!current) throw new Error("Project is not ready");
+    if (cloudExportRunning.current) throw new Error("An export is already running");
+    if (!await confirm("This legacy export uses Cloudflare rendering and consumes the app's cloud allowance. Continue?", "Export via cloud rendering?", "Export")) throw new Error("Cloud export canceled before starting");
+    cloudExportRunning.current = true;
+    try {
+    await durability();
     if (exportResetTimer.current !== null) window.clearTimeout(exportResetTimer.current);
     setReadyExport(null);
     setExportStatus("Starting export…");
@@ -465,7 +484,9 @@ export function Editor({ projectId }: { projectId: string }) {
     if (!response.ok || !job.id) throw new Error(job.error || "Could not start export");
     for (let attempt = 0; attempt < 900; attempt++) {
       await new Promise((resolve) => setTimeout(resolve, 1000));
-      const status = await fetch(`${MEDIA_URL}/jobs/${job.id}`).then((result) => result.json()) as { status: string; output?: string; error?: string };
+      const response = await fetch(`${MEDIA_URL}/jobs/${job.id}`);
+      const status = await response.json() as { status: string; output?: string; error?: string };
+      if (!response.ok) throw new Error(status.error || "Export expired or interrupted. Render again explicitly if needed.");
       setExportStatus(status.status === "running" ? "Rendering MP4…" : status.status);
       if (status.status === "failed") throw new Error(status.error || "Export failed");
       if (status.status === "complete") {
@@ -490,7 +511,9 @@ export function Editor({ projectId }: { projectId: string }) {
       }
     }
     throw new Error("Export timed out");
-  }, [editor.stateRef]);
+    } catch (cause) { setExportStatus(""); throw cause; }
+    finally { cloudExportRunning.current = false; }
+  }, [editor.stateRef, durability, confirm]);
 
   const downloadReadyExport = useCallback(async () => {
     if (!readyExport) return;
@@ -530,43 +553,57 @@ export function Editor({ projectId }: { projectId: string }) {
   }, [editor.stateRef]);
 
   const detectSilences = useCallback(async (thresholdDb = -35, minimumMs = 500) => {
-    const response = await fetch(`${MEDIA_URL}/silences`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ projectId, thresholdDb, minimumMs }) });
-    const result = await response.json() as { ranges?: Array<{ startMs: number; endMs: number }>; error?: string };
-    if (!response.ok || !result.ranges) throw new Error(result.error || "Silence detection failed");
-    return result.ranges;
-  }, [projectId]);
+    if (!sourceAnalysis.current) throw new Error("Source audio analysis is not ready");
+    return silenceCandidates(await sourceAnalysis.current, thresholdDb, minimumMs);
+  }, []);
 
   const transcribeVideo = useCallback(async (actor: "human" | "agent" | "system" = "human", provider: "cloudflare" | "openai" = "cloudflare", apiKey = "", onProgress?: (message: string) => void, expectedVersion?: number) => {
-    onProgress?.("Extracting audio…");
-    const prepResponse = await fetch(`${MEDIA_URL}/transcription/prepare`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ projectId }) });
-    const prep = await prepResponse.json() as { chunks?: Array<{ index: number; offsetMs: number; url: string }>; error?: string };
-    if (!prepResponse.ok || !prep.chunks) throw new Error(prep.error || "Audio extraction failed");
-    const words: TranscriptWord[] = [];
-    for (let index = 0; index < prep.chunks.length; index++) {
-      const chunk = prep.chunks[index];
-      onProgress?.(`Transcribing ${index + 1}/${prep.chunks.length}…`);
-      const audio = await fetch(`${MEDIA_URL}${chunk.url}`).then((response) => response.blob());
-      const form = new FormData(); form.set("audio", audio, `chunk-${index}.mp3`); form.set("provider", provider);
-      const response = await fetch("/api/transcribe", { method: "POST", headers: provider === "openai" ? { "x-openai-key": apiKey } : undefined, body: form });
-      const result = await response.json() as { words?: TranscriptWord[]; error?: string };
-      if (!response.ok || !result.words) throw new Error(result.error || "Transcription failed");
-      words.push(...result.words.map((word) => ({ ...word, id: crypto.randomUUID(), startMs: word.startMs + chunk.offsetMs, endMs: word.endMs + chunk.offsetMs })));
+    if (transcriptionController.current) throw new Error("Transcription is already running in this editor");
+    const initial = editor.stateRef.current;
+    if (!initial) throw new Error("Project is not ready");
+    const controller = new AbortController();
+    transcriptionController.current = controller;
+    const progress = (message: string) => { setAutoTranscriptionStatus(message); onProgress?.(message); };
+    try {
+      if (!await confirm(`Transcription sends audio to ${provider === "openai" ? "OpenAI using your key" : "Cloudflare Workers AI"}. Continue?`, "Transcribe video?", "Transcribe")) throw new Error("Transcription canceled; no audio was uploaded");
+      controller.signal.throwIfAborted();
+      const chunks = Math.ceil(initial.durationMs / 300_000);
+      const words: TranscriptWord[] = [];
+      const source = media.source;
+      if (!source) throw new Error("Relink the source video before transcribing");
+      let cache: Cache | undefined;
+      try { cache = await caches.open("rough-cut-transcription-v1"); } catch { /* Optional checkpoint storage. */ }
+      for (let index = 0; index < chunks; index++) {
+        controller.signal.throwIfAborted();
+        const offsetMs = index * 300_000;
+        const key = new URL(`/__rough_cut_transcript_v1/${projectId}/${provider}/${index}`, location.origin).href;
+        let result: { words?: TranscriptWord[]; error?: string } | undefined;
+        try { const checkpoint = await cache?.match(key); if (checkpoint) result = await checkpoint.json(); } catch { /* Retry this chunk normally. */ }
+        if (!Array.isArray(result?.words)) {
+          progress(`Preparing audio locally ${index + 1}/${chunks}…`);
+          const chunk = await prepareAudioChunk(source, offsetMs, Math.min(initial.durationMs, offsetMs + 300_000), controller.signal);
+          const form = new FormData(); form.set("audio", chunk.audio, `chunk-${index}.wav`); form.set("provider", provider);
+          progress(`Transcribing ${index + 1}/${chunks}…`);
+          const response = await fetch("/api/transcribe", { method: "POST", headers: provider === "openai" ? { "x-openai-key": apiKey } : undefined, body: form, signal: controller.signal });
+          result = await response.json();
+          if (!response.ok || !Array.isArray(result?.words)) throw new Error(result?.error || "Transcription failed");
+          try { await cache?.put(key, Response.json(result)); } catch { /* Successful work still remains in this run. */ }
+        }
+        words.push(...result!.words!.map((word) => ({ ...word, startMs: word.startMs + offsetMs, endMs: word.endMs + offsetMs })));
+      }
+      controller.signal.throwIfAborted();
+      const currentVersion = editor.stateRef.current?.version;
+      if (expectedVersion !== undefined && currentVersion !== expectedVersion) throw new Error(`STALE_VERSION:${currentVersion ?? 0}`);
+      return saveTranscript(words, actor);
+    } finally {
+      transcriptionController.current = null;
+      setAutoTranscriptionStatus("");
+      onProgress?.("");
     }
-    const currentVersion = editor.stateRef.current?.version;
-    if (expectedVersion !== undefined && currentVersion !== expectedVersion) throw new Error(`STALE_VERSION:${currentVersion ?? 0}`);
-    return saveTranscript(words, actor);
-  }, [editor.stateRef, projectId, saveTranscript]);
-
-  useEffect(() => {
-    if (!state || transcript.length || autoTranscribeStarted.current || state.activity.some((item) => item.summary === "transcribed video")) return;
-    autoTranscribeStarted.current = true;
-    void transcribeVideo("system", "cloudflare", "", setAutoTranscriptionStatus)
-      .then(() => setAutoTranscriptionStatus(""))
-      .catch((cause) => { setAutoTranscriptionStatus(""); setError(cause instanceof Error ? cause.message : "Automatic transcription failed"); });
-  }, [setError, state, transcript.length, transcribeVideo]);
+  }, [editor.stateRef, media.source, projectId, saveTranscript, confirm]);
 
   useWebMCP({
-    stateRef: editor.stateRef, transcriptRef: editor.transcriptRef, dispatch, undo, redo,
+    stateRef: editor.stateRef, transcriptRef: editor.transcriptRef, dispatch, undo, redo, durability: editor.durability,
     seekTimeline, inspectFrame, detectSilences, transcribeVideo: (actor, expectedVersion) => transcribeVideo(actor, "cloudflare", "", undefined, expectedVersion), exportMp4, exportEdl: exportEdlFile,
     exportSrt: () => { const current = editor.stateRef.current; if (!current) throw new Error("Project is not ready"); const text = exportSrt(current); downloadText(`${current.name}.srt`, text, "application/x-subrip"); return text; },
     requestBackgroundMusicUpload: () => { const current = editor.stateRef.current; if (current?.music.length) return { status: "already_uploaded", message: "Background music is already available on A2; use adjust_background_music." }; setTab("music"); setMusicUploadRequested(true); return { status: "human_action_required", message: "The Music tab is open and Choose music is highlighted. Ask the human to click it and select a local audio file." }; },
@@ -579,8 +616,9 @@ export function Editor({ projectId }: { projectId: string }) {
     <main className="grid h-dvh min-h-0 grid-rows-[58px_auto_minmax(0,1fr)_var(--timeline-height)_var(--lower-height)] overflow-hidden bg-[var(--bg)] max-[900px]:h-auto max-[900px]:min-h-dvh max-[900px]:grid-rows-[auto_auto_auto_180px_290px] max-[900px]:overflow-visible" style={{ "--timeline-height": `${timelineHeight}px`, "--lower-height": `${lowerHeight}px` } as React.CSSProperties}>
       <header className="row-start-1 grid grid-cols-[220px_1fr_auto] items-center gap-5 border-b border-[var(--line)] bg-[#0d0f12] px-[18px] max-[900px]:min-h-[58px] max-[900px]:grid-cols-[auto_1fr] max-[900px]:p-2.5">
         <Link href="/" className="inline-flex items-center gap-[.22em] text-[17px] font-black tracking-[-.07em] text-white no-underline"><span>ROUGH</span><i className="not-italic text-[var(--orange)]">{"//"}</i><span>CUT</span></Link>
-        <div className="flex min-w-0 items-center gap-2.5">{renaming && state ? <form className="flex min-w-0 items-center gap-1.5" onSubmit={(event) => { event.preventDefault(); const name = projectNameDraft.trim(); if (!name) return; dispatch({ type: "rename_project", actor: "human", name }); setRenaming(false); }}><input autoFocus maxLength={120} className="min-w-0 rounded border border-[var(--lime)] bg-[#0b0d10] px-2 py-1 text-[12px] text-white" aria-label="Project name" value={projectNameDraft} onChange={(event) => setProjectNameDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape") setRenaming(false); }} /><button className="cursor-pointer rounded border border-[var(--line)] bg-[#20242b] px-2 py-1 text-[9px]">Save</button></form> : <button className="inline-flex min-w-0 cursor-pointer items-center gap-1.5 overflow-hidden border-0 bg-transparent p-0 text-left text-[13px] font-bold text-white whitespace-nowrap" title="Rename project" onClick={() => { setProjectNameDraft(state?.name ?? project.name); setRenaming(true); }}><span className="overflow-hidden text-ellipsis">{state?.name ?? project.name}</span><span className="text-[10px] text-[var(--muted)]" aria-hidden="true">✎</span></button>}<span className="text-[10px] text-[var(--muted)] max-[900px]:hidden"><SaveStatus saving={saving} savedAt={lastSavedAt} ready={!!state} /></span></div>
+        <div className="flex min-w-0 items-center gap-2.5">{renaming && state ? <form className="flex min-w-0 items-center gap-1.5" onSubmit={(event) => { event.preventDefault(); const name = projectNameDraft.trim(); if (!name) return; dispatch({ type: "rename_project", actor: "human", name }); setRenaming(false); }}><input autoFocus maxLength={120} className="min-w-0 rounded border border-[var(--lime)] bg-[#0b0d10] px-2 py-1 text-[12px] text-white" aria-label="Project name" value={projectNameDraft} onChange={(event) => setProjectNameDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape") setRenaming(false); }} /><button className="cursor-pointer rounded border border-[var(--line)] bg-[#20242b] px-2 py-1 text-[9px]">Save</button></form> : <button className="inline-flex min-w-0 cursor-pointer items-center gap-1.5 overflow-hidden border-0 bg-transparent p-0 text-left text-[13px] font-bold text-white whitespace-nowrap" title="Rename project" onClick={() => { setProjectNameDraft(state?.name ?? project.name); setRenaming(true); }}><span className="overflow-hidden text-ellipsis">{state?.name ?? project.name}</span><span className="text-[10px] text-[var(--muted)]" aria-hidden="true">✎</span></button>}<span className="text-[10px] text-[var(--muted)] max-[900px]:hidden">{editor.saveFailed ? "Not saved · recovery available" : <SaveStatus saving={saving} savedAt={lastSavedAt} ready={!!state} />}</span></div>
         <div className="flex items-center gap-2.25 max-[900px]:col-span-full max-[900px]:flex-wrap">
+          {project.local && <button className="cursor-pointer rounded border border-[var(--line)] px-2 py-1 text-xs" onClick={() => void durability().then(() => getLocalProject(projectId)).then((document) => { if (document) downloadText(`${document.state.name}.rough-cut.json`, JSON.stringify(document), "application/json"); }).catch((cause) => setError(String(cause)))}>Project backup</button>}
           <span className="inline-flex items-center gap-1.75 rounded-full border border-[#323740] px-2.5 py-1.5 text-[9px] tracking-[.08em] text-[var(--muted)] uppercase"><b className={`size-1.75 rounded-full ${webmcpStatus === "Ready" ? "bg-[var(--lime)] shadow-[0_0_8px_var(--lime)]" : "bg-[#666]"}`} /> WebMCP {webmcpStatus}</span>
           <button className="inline-flex cursor-pointer items-center gap-1.5 rounded-[7px] border border-[var(--line)] bg-transparent px-3 py-1.75 text-[10px]" onClick={() => state && downloadText(`${state.name}.edl`, exportEdl(state))}><Download className="size-3" aria-hidden="true" />EDL</button>
           <button className="inline-flex cursor-pointer items-center gap-1.5 rounded-[7px] border border-[var(--line)] bg-transparent px-3 py-1.75 text-[10px]" disabled={!state?.captions.length} onClick={() => state && downloadText(`${state.name}.srt`, exportSrt(state), "application/x-subrip")}><Download className="size-3" aria-hidden="true" />SRT</button>
@@ -589,13 +627,14 @@ export function Editor({ projectId }: { projectId: string }) {
         </div>
       </header>
 
-      {error && <div className="row-start-2 flex justify-between border-b border-[#7c3024] bg-[#401c17] px-[18px] py-2 text-xs text-[#ff9781]" role="alert">{error}<button className="cursor-pointer border-0 bg-transparent" aria-label="Dismiss error" onClick={() => setError("")}>×</button></div>}
+      {media.missing.length > 0 && !error && <div className="row-start-2 flex flex-wrap items-center gap-3 border-b border-[var(--line)] bg-[#202716] px-4 py-2 text-xs"><span>Select original media to resume preview/export. Edits are saved locally.</span>{media.missing.map(({ id, description }) => <label key={id} className="flex items-center gap-2">{description.name}<input className="max-w-48 text-xs" type="file" accept={id === "source" ? "video/*" : "audio/*"} onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) { void media.relink(id, file).then(() => setError("")).catch((cause) => { if (!(cause instanceof DOMException && cause.name === "AbortError")) setError(String(cause)); }); } }} /></label>)}</div>}
+      {error && <div className="row-start-2 flex justify-between border-b border-[#7c3024] bg-[#401c17] px-[18px] py-2 text-xs text-[#ff9781]" role="alert"><span>{error}{editor.saveFailed && <span className="ml-3 inline-flex gap-3"><button className="cursor-pointer underline" onClick={() => downloadText(`${state?.name ?? "project"}-recovery.json`, JSON.stringify({ state: editor.stateRef.current, transcript: editor.transcriptRef.current }, null, 2), "application/json")}>Back up pending edits</button><button className="cursor-pointer underline" onClick={editor.discardRecovery}>Reload saved version</button></span>}</span><button className="cursor-pointer border-0 bg-transparent" aria-label="Dismiss error" onClick={() => setError("")}>×</button></div>}
 
       <section className="row-start-3 grid min-h-0 grid-cols-[minmax(0,1fr)_280px] max-[900px]:grid-cols-1">
         <div className="flex min-h-0 min-w-0 flex-col items-center justify-center overflow-hidden bg-[radial-gradient(circle,_#1b1e24_0,_#0e1013_70%)] p-3 max-[900px]:overflow-visible max-[900px]:p-2.5">
           <div ref={previewStageRef} className="preview-stage relative aspect-video h-[calc(100%_-_42px)] w-auto max-w-full flex-none overflow-hidden rounded-[5px] bg-black shadow-[0_20px_60px_#0009] fullscreen:h-screen fullscreen:w-screen fullscreen:max-w-none fullscreen:rounded-none max-[900px]:h-auto max-[900px]:w-full">
             <video
-              ref={videoRef} src={`/api/projects/${projectId}/media`} playsInline preload="metadata" aria-label="Video preview" className="block size-full object-contain"
+              ref={videoRef} src={media.urls.source} playsInline preload="metadata" aria-label="Video preview" className="block size-full object-contain"
               style={{ filter: cssFilter(activeClip), transform: cssTransform(activeClip) }}
               onLoadedMetadata={(event) => { initialize(event.currentTarget.duration * 1000); requestAnimationFrame(ensureInitialSeek); }}
               onTimeUpdate={updatePlayback}
@@ -603,8 +642,8 @@ export function Editor({ projectId }: { projectId: string }) {
               onPlay={() => { setIsPlaying(true); syncMusic(playheadMs, true); if (transitionStarted.current) void nextVideoRef.current?.play(); }}
               onPause={() => { if (gapFrame.current === null) { setIsPlaying(false); musicRef.current?.pause(); } nextVideoRef.current?.pause(); }}
             />
-            {!!state?.music.length && <audio ref={musicRef} src={`/api/projects/${projectId}/music?asset=${state.music[0].assetId}`} preload="auto" aria-label="Background music" onTimeUpdate={(event) => { const music = state.music.find((item) => playheadMs >= item.timelineStartMs && playheadMs < musicClipEnd(state, item)); if (!music) return; if (event.currentTarget.currentTime * 1000 >= music.sourceOutMs - 15) { if (music.loop) event.currentTarget.currentTime = music.sourceInMs / 1000; else event.currentTarget.pause(); } }} />}
-            <video ref={nextVideoRef} src={`/api/projects/${projectId}/media`} playsInline preload="metadata" muted={false} aria-hidden="true" className="pointer-events-none absolute inset-0 block size-full object-contain" style={{ opacity: secondaryOpacity, filter: cssFilter(nextClip), transform: cssTransform(nextClip) }} />
+            {!!state?.music.length && <audio ref={musicRef} src={media.urls[state.music[0].assetId]} preload="auto" aria-label="Background music" onTimeUpdate={(event) => { const music = state.music.find((item) => playheadMs >= item.timelineStartMs && playheadMs < musicClipEnd(state, item)); if (!music) return; if (event.currentTarget.currentTime * 1000 >= music.sourceOutMs - 15) { if (music.loop) event.currentTarget.currentTime = music.sourceInMs / 1000; else event.currentTarget.pause(); } }} />}
+            <video ref={nextVideoRef} src={media.urls.source} playsInline preload="metadata" muted={false} aria-hidden="true" className="pointer-events-none absolute inset-0 block size-full object-contain" style={{ opacity: secondaryOpacity, filter: cssFilter(nextClip), transform: cssTransform(nextClip) }} />
             <div className="pointer-events-none absolute inset-0 bg-black" style={{ opacity: blackOpacity }} />
             {state && <PreviewTextLayer state={state} playheadMs={playheadMs} preview={textPreview} captionBackgroundOpacity={captionOpacityPreview} />}
             <button className="absolute top-2.5 right-2.5 z-5 cursor-pointer rounded-md border border-[#ffffff38] bg-[#080808aa] p-2" aria-label={isFullscreen ? "Exit full screen" : "Enter full screen"} onClick={() => { const action = document.fullscreenElement ? document.exitFullscreen() : previewStageRef.current?.requestFullscreen(); void action?.catch((cause) => setError(cause instanceof Error ? cause.message : "Full screen failed")); }} title={isFullscreen ? "Exit full screen" : "Enter full screen"}>{isFullscreen ? <Minimize2 className="size-4" aria-hidden="true" /> : <Maximize2 className="size-4" aria-hidden="true" />}</button>
@@ -631,7 +670,7 @@ export function Editor({ projectId }: { projectId: string }) {
             <button aria-label={isPlaying ? "Pause" : "Play"} aria-pressed={isPlaying} title={isPlaying ? "Pause" : "Play"} className="inline-flex w-8 cursor-pointer justify-center rounded-[5px] border border-[var(--line)] bg-[var(--panel-2)] px-2.25 py-1.5 text-[11px]" onClick={togglePlayback}>{isPlaying ? "Ⅱ" : "▶"}</button>
             <button className="cursor-pointer rounded-[5px] border border-[var(--line)] bg-[var(--panel-2)] px-2.25 py-1.5 text-[11px]" onClick={splitAtPlayhead}>⌁ Split</button>
             <button className="cursor-pointer rounded-[5px] border border-[var(--line)] bg-[var(--panel-2)] px-2.25 py-1.5 text-[11px]" disabled={!selectedClip} title="Delete selected clip and leave its gap (Backspace)" onClick={() => selectedClip && dispatch({ type: "delete_clip", actor: "human", clipId: selectedClip.id })}>⌫ Delete</button>
-            <button aria-pressed={effectiveSnapEnabled} title="Toggle timeline snapping (hold Option/Alt to temporarily invert)" className={`inline-flex cursor-pointer items-center gap-1.5 rounded-[5px] border border-[var(--line)] bg-[var(--panel-2)] px-2.25 py-1.5 text-[11px] ${effectiveSnapEnabled ? "!border-[var(--lime)] !text-[var(--lime)]" : ""}`} onClick={() => setSnapEnabled((enabled) => !enabled)}><Magnet className="size-3" aria-hidden="true" /> Snap</button>
+            <button aria-pressed={effectiveSnapEnabled} title="Toggle snapping (N); changes during a drag last until that drag ends" className={`inline-flex cursor-pointer items-center gap-1.5 rounded-[5px] border border-[var(--line)] bg-[var(--panel-2)] px-2.25 py-1.5 text-[11px] ${effectiveSnapEnabled ? "!border-[var(--lime)] !text-[var(--lime)]" : ""}`} onClick={snapping.toggle}><Magnet className="size-3" aria-hidden="true" /> Snap</button>
           </div>
           <div className="flex items-center gap-1.5">
             <button className="cursor-pointer rounded-[5px] border border-[var(--line)] bg-[var(--panel-2)] px-2.25 py-1.5 text-[11px]" disabled={!canUndo} aria-label="Undo last edit" onClick={() => undo()}>↶ Undo</button>
@@ -639,7 +678,7 @@ export function Editor({ projectId }: { projectId: string }) {
             <span className="ml-2 text-[10px] text-[var(--muted)]">{state?.clips.length ?? 0} clips · {formatTime(totalMs)}</span>
           </div>
         </div>
-        {state && <Timeline state={state} waveform={waveform} musicWaveform={musicWaveform} musicPreview={musicPreview} snapEnabled={snapEnabled} playheadMs={playheadMs} selectedClipId={selectedClip?.id ?? ""} selectedMusicId={selectedMusicId} selectedText={selectedText} onSelect={(id) => { setSelectedClipId(id); setSelectedText(null); setSelectedMusicId(""); }} onEditText={(kind, id) => { setSelectedText({ kind, id }); setSelectedClipId(""); setSelectedMusicId(""); setTab("text"); }} onEditMusic={(id) => { setSelectedMusicId(id); setSelectedClipId(""); setSelectedText(null); setTab("music"); }} onClearSelection={() => { setSelectedClipId(""); setSelectedMusicId(""); setSelectedText(null); }} onSeek={seekTimeline} dispatch={dispatch} setError={setError} />}
+        {state && <Timeline state={state} waveform={waveform} musicWaveform={musicWaveform} musicPreview={musicPreview} snapping={snapping} playheadMs={playheadMs} selectedClipId={selectedClip?.id ?? ""} selectedMusicId={selectedMusicId} selectedText={selectedText} onSelect={(id) => { setSelectedClipId(id); setSelectedText(null); setSelectedMusicId(""); }} onEditText={(kind, id) => { setSelectedText({ kind, id }); setSelectedClipId(""); setSelectedMusicId(""); setTab("text"); }} onEditMusic={(id) => { setSelectedMusicId(id); setSelectedClipId(""); setSelectedText(null); setTab("music"); }} onClearSelection={() => { setSelectedClipId(""); setSelectedMusicId(""); setSelectedText(null); }} onSeek={seekTimeline} dispatch={dispatch} setError={setError} />}
       </section>
 
       <section className="relative row-start-5 grid min-h-0 grid-rows-[36px_1fr] overflow-hidden bg-[var(--panel)]">
@@ -648,14 +687,15 @@ export function Editor({ projectId }: { projectId: string }) {
           {(["transcript", "text", "music", "silence", "activity"] as const).map((name) => <button key={name} role="tab" aria-selected={tab === name} className={`cursor-pointer border-0 border-b-2 bg-transparent text-[9px] tracking-[.12em] uppercase ${tab === name ? "border-[var(--lime)] text-white" : "border-transparent text-[#777e89]"}`} onClick={() => setTab(name)}>{name}</button>)}
         </div>
         <div className="min-h-0 overflow-auto" role="tabpanel">
-          {tab === "transcript" && state && <TranscriptPanel state={state} transcript={transcript} playheadMs={playheadMs} dispatch={dispatch} transcribeVideo={transcribeVideo} automaticStatus={autoTranscriptionStatus} seekTimeline={seekTimeline} setError={setError} />}
+          {tab === "transcript" && state && <TranscriptPanel state={state} transcript={transcript} playheadMs={playheadMs} dispatch={dispatch} transcribeVideo={transcribeVideo} automaticStatus={autoTranscriptionStatus} cancelTranscription={() => transcriptionController.current?.abort()} seekTimeline={seekTimeline} setError={setError} />}
           {tab === "text" && state && <TextPanel state={state} playheadMs={playheadMs} dispatch={dispatch} />}
-          {tab === "music" && state && <MusicPanel projectId={projectId} state={state} requested={musicUploadRequested} onRequestComplete={() => setMusicUploadRequested(false)} dispatch={dispatch} setError={setError} />}
+          {tab === "music" && state && <MusicPanel projectId={projectId} local={!!project.local} state={state} requested={musicUploadRequested} onRequestComplete={() => setMusicUploadRequested(false)} dispatch={dispatch} setError={setError} />}
           {tab === "silence" && state && <SilencePanel transcript={transcript} detect={detectSilences} dispatch={dispatch} setError={setError} />}
           {tab === "activity" && state && <ActivityPanel state={state} />}
         </div>
       </section>
 
+      {confirmation}{editor.confirmation}
       {exportDialog && <div className="fixed inset-0 z-30 grid place-items-center bg-[#000c] p-5" role="dialog" aria-modal="true" aria-labelledby="export-title" onClick={() => setExportDialog(false)}><form className="w-[min(440px,100%)] rounded-xl border border-[#3a4049] bg-[#14171b] p-5 shadow-2xl" onClick={(event) => event.stopPropagation()} onSubmit={(event) => { event.preventDefault(); void startHumanExport().catch((cause) => { setError(cause instanceof Error ? cause.message : "Export failed"); setExportStatus(""); setExportDialog(false); }); }}><h2 id="export-title" className="mt-0 mb-1 text-lg">Export MP4</h2><p className="mt-0 mb-5 text-[11px] text-[var(--muted)]">{typeof window !== "undefined" && "showSaveFilePicker" in window ? "Choose the file name, then select where to save it." : "Choose the file name. This browser will save it to its configured Downloads folder."}</p><label className="grid gap-1.5 text-[10px] text-[var(--muted)] uppercase">File name<span className="flex overflow-hidden rounded-md border border-[var(--line)] bg-[#0b0d10]"><input autoFocus className="min-w-0 flex-1 border-0 bg-transparent px-3 py-2 text-[12px] text-white outline-none" value={exportName} onChange={(event) => setExportName(event.target.value)} /><b className="border-l border-[var(--line)] px-3 py-2 text-[12px] font-normal text-[#888f99] normal-case">.mp4</b></span></label>{/[\\/]/.test(exportName) && <p className="mb-0 text-[10px] text-[#ff9781]">File name cannot contain slashes.</p>}<div className="mt-5 flex justify-end gap-2"><button type="button" className="cursor-pointer rounded-md border border-[var(--line)] bg-transparent px-3 py-2 text-[10px]" onClick={() => setExportDialog(false)}>Cancel</button><button type="submit" disabled={!exportName.trim() || /[\\/]/.test(exportName)} className="cursor-pointer rounded-md border-0 bg-[var(--lime)] px-3 py-2 text-[10px] font-bold text-[#10120d]">Export</button></div></form></div>}
       {frame && <div className="fixed inset-0 z-30 grid place-items-center bg-[#000d] p-5" role="dialog" aria-modal="true" aria-label="Captured frame" onClick={() => setFrame(null)}><div className="relative max-w-[960px] rounded-lg border border-[#444] bg-[#111] p-2" onClick={(event) => event.stopPropagation()}><button className="absolute top-3 right-3 size-[30px] cursor-pointer rounded-full border-0 bg-[#000c]" aria-label="Close captured frame" onClick={() => setFrame(null)}>×</button><img className="block max-w-full" src={frame} alt={`Captured frame at ${formatTime(playheadMs)}`} /><p className="mx-1 mt-2 mb-0.5 font-mono text-[10px] text-[var(--muted)]">Frame at {formatTime(playheadMs)}</p></div></div>}
     </main>
@@ -679,7 +719,12 @@ function RangeControl({ label, value, resetValue, min, max, step, suffix = "", o
   return <label className="my-2.5 block"><span className="flex items-center justify-between text-[10px] leading-none text-[#a6abb4]">{label}<span className="flex h-4 items-center gap-1"><output className="inline-flex h-4 items-center font-mono leading-none text-[#f3f3f4]">{draft}{suffix}</output><button type="button" className="inline-flex size-4 cursor-pointer items-center justify-center border-0 bg-transparent p-0 text-[#858b96] hover:text-(--lime) focus-visible:text-(--lime)" title={`Reset ${label}`} aria-label={`Reset ${label}`} onClick={(event) => { event.preventDefault(); reset(); }}><RotateCcw className="size-2.5 -translate-y-[0.5px] shrink-0" strokeWidth={2} aria-hidden="true" /></button></span></span><input className="h-0.75 w-full accent-(--lime)" type="range" min={min} max={max} step={step} value={draft} onChange={(event) => { const next = Number(event.target.value); setDraft(next); onPreview?.(next); }} onPointerUp={() => onCommit(draft)} onKeyUp={(event) => { if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"].includes(event.key)) onCommit(draft); }} /></label>;
 }
 
-function TextInspector({ state, kind, item, onPreview, onCommit, onCaptionOpacityPreview, onCaptionOpacityCommit, dispatch }: { state: ProjectState; kind: "caption" | "overlay"; item: TimedText; onPreview(patch: Partial<TimedText>): void; onCommit(): void; onCaptionOpacityPreview(value: number): void; onCaptionOpacityCommit(): void; dispatch(command: CommandInput): ProjectState }) {
+async function requestBroll(range: { startMs: number; endMs: number }, dispatch: (command: CommandInput) => unknown, prompt: (title: string) => Promise<string | null>) {
+  const label = await prompt("B-roll brief for this source range");
+  if (label?.trim()) dispatch({ type: "mark_broll", actor: "human", ...range, label: label.trim() });
+}
+
+export function TextInspector({ state, kind, item, onPreview, onCommit, onCaptionOpacityPreview, onCaptionOpacityCommit, dispatch }: { state: ProjectState; kind: "caption" | "overlay"; item: TimedText; onPreview(patch: Partial<TimedText>): void; onCommit(): void; onCaptionOpacityPreview(value: number): void; onCaptionOpacityCommit(): void; dispatch(command: CommandInput): ProjectState }) {
   const adjust = (patch: Partial<TimedText>) => { onCommit(); return dispatch({ type: kind === "caption" ? "update_caption" : "update_overlay", actor: "human", id: item.id, patch }); };
   return <div className="px-3.5 pt-3 pb-[30px]">
     <label className="text-[9px] text-[var(--muted)] uppercase">Text<textarea key={`${item.id}-${item.text}`} className="mt-1 min-h-16 w-full resize-y rounded-[5px] border border-[var(--line)] bg-[#0c0e11] p-2 text-[11px] text-white" defaultValue={item.text} onBlur={(event) => { const text = event.target.value.trim(); if (text && text !== item.text) adjust({ text }); }} /></label>
@@ -690,12 +735,13 @@ function TextInspector({ state, kind, item, onPreview, onCommit, onCaptionOpacit
   </div>;
 }
 
-function MusicInspector({ state, music, onPreview, onCommit, dispatch }: { state: ProjectState; music: MusicClip; onPreview(patch: Partial<MusicClip>): void; onCommit(): void; dispatch(command: CommandInput): ProjectState }) {
+export function MusicInspector({ state, music, onPreview, onCommit, dispatch }: { state: ProjectState; music: MusicClip; onPreview(patch: Partial<MusicClip>): void; onCommit(): void; dispatch(command: CommandInput): ProjectState }) {
   const adjust = (patch: Partial<Pick<MusicClip, "timelineStartMs" | "sourceInMs" | "sourceOutMs" | "speed" | "volume" | "muted" | "fadeInMs" | "fadeOutMs" | "loop">>) => { onCommit(); return dispatch({ type: "adjust_music", actor: "human", clipId: music.id, patch }); };
   return <div className="px-3.5 pt-3 pb-[30px]"><b className="block overflow-hidden text-xs text-ellipsis whitespace-nowrap">{music.name}</b><small className="text-[9px] text-[var(--muted)]">{formatTime(music.durationMs)} source</small><RangeControl label="Volume" value={music.volume} resetValue={0.3} min={0} max={5} step={0.05} onPreview={(volume) => onPreview({ volume })} onCommit={(volume) => adjust({ volume })} /><RangeControl label="Speed" value={music.speed} resetValue={1} min={0.5} max={2} step={0.05} suffix="×" onPreview={(speed) => onPreview({ speed })} onCommit={(speed) => adjust({ speed })} /><RangeControl label="Fade in" value={music.fadeInMs} resetValue={0} min={0} max={Math.min(5000, (music.sourceOutMs - music.sourceInMs) / music.speed / 2)} step={50} suffix="ms" onCommit={(fadeInMs) => adjust({ fadeInMs })} /><RangeControl label="Fade out" value={music.fadeOutMs} resetValue={0} min={0} max={Math.min(5000, (music.sourceOutMs - music.sourceInMs) / music.speed / 2)} step={50} suffix="ms" onCommit={(fadeOutMs) => adjust({ fadeOutMs })} /><div className="grid grid-cols-3 gap-1"><label className="text-[9px] text-[var(--muted)]">Start<input className="mt-1 w-full rounded border border-[var(--line)] bg-[#0b0d10] p-1 text-white" type="number" min={0} max={timelineDuration(state) - 50} defaultValue={Math.round(music.timelineStartMs)} key={`start-${music.timelineStartMs}`} onBlur={(event) => adjust({ timelineStartMs: Number(event.target.value) })} /></label><label className="text-[9px] text-[var(--muted)]">In<input className="mt-1 w-full rounded border border-[var(--line)] bg-[#0b0d10] p-1 text-white" type="number" min={0} max={music.sourceOutMs - 50} defaultValue={Math.round(music.sourceInMs)} key={`in-${music.sourceInMs}`} onBlur={(event) => adjust({ sourceInMs: Number(event.target.value) })} /></label><label className="text-[9px] text-[var(--muted)]">Out<input className="mt-1 w-full rounded border border-[var(--line)] bg-[#0b0d10] p-1 text-white" type="number" min={music.sourceInMs + 50} max={music.durationMs} defaultValue={Math.round(music.sourceOutMs)} key={`out-${music.sourceOutMs}`} onBlur={(event) => adjust({ sourceOutMs: Number(event.target.value) })} /></label></div><div className="mt-4 flex items-center gap-3"><label className="flex items-center gap-1 text-[10px]"><input type="checkbox" checked={music.loop} onChange={(event) => adjust({ loop: event.target.checked })} /> Loop</label><label className="flex items-center gap-1 text-[10px]"><input type="checkbox" checked={music.muted} onChange={(event) => adjust({ muted: event.target.checked })} /> Mute</label></div><button className="mt-5 w-full cursor-pointer rounded border border-[#713d47] bg-transparent px-2 py-1.5 text-[10px] text-[#ff9aa9]" onClick={() => dispatch({ type: "remove_music", actor: "human", clipId: music.id })}>Remove music clip</button></div>;
 }
 
-function ClipInspector({ state, clip, dispatch, previewClip, setError }: { state: ProjectState; clip: Clip; dispatch(command: CommandInput): ProjectState; previewClip(clipId: string, patch: Partial<Clip>): void; setError(message: string): void }) {
+export function ClipInspector({ state, clip, dispatch, previewClip, setError }: { state: ProjectState; clip: Clip; dispatch(command: CommandInput): ProjectState; previewClip(clipId: string, patch: Partial<Clip>): void; setError(message: string): void }) {
+  const { prompt, confirmation } = useConfirmation();
   const [scaleLocked, setScaleLocked] = useState(true);
   const preview = (patch: Partial<Clip>) => previewClip(clip.id, patch);
   const adjust = (patch: Partial<Clip>) => { try { dispatch({ type: "adjust_clip", actor: "human", clipId: clip.id, patch }); } catch (cause) { setError((cause as Error).message); } };
@@ -703,7 +749,7 @@ function ClipInspector({ state, clip, dispatch, previewClip, setError }: { state
   const next = state.clips[state.clips.findIndex((item) => item.id === clip.id) + 1];
   const trim = (sourceInMs: number, sourceOutMs: number) => { try { dispatch({ type: "trim_clip", actor: "human", clipId: clip.id, sourceInMs, sourceOutMs }); } catch (cause) { setError((cause as Error).message); } };
   return <div className="px-3.5 pt-3 pb-[30px]">
-    <div className="grid grid-cols-2 gap-1.75">
+    {confirmation}<div className="grid grid-cols-2 gap-1.75">
       <label className="text-[9px] text-[var(--muted)] uppercase">In<input className="mt-1 w-full rounded-[5px] border border-[var(--line)] bg-[#0c0e11] p-1.5 text-white" key={`${clip.id}-in-${clip.sourceInMs}`} type="number" min={0} max={clip.sourceOutMs - 50} defaultValue={Math.round(clip.sourceInMs)} onBlur={(event) => { const value = Number(event.target.value); if (value < clip.sourceOutMs && value !== clip.sourceInMs) trim(value, clip.sourceOutMs); }} /></label>
       <label className="text-[9px] text-[var(--muted)] uppercase">Out<input className="mt-1 w-full rounded-[5px] border border-[var(--line)] bg-[#0c0e11] p-1.5 text-white" key={`${clip.id}-out-${clip.sourceOutMs}`} type="number" min={clip.sourceInMs + 50} max={state.durationMs} defaultValue={Math.round(clip.sourceOutMs)} onBlur={(event) => { const value = Number(event.target.value); if (value > clip.sourceInMs && value !== clip.sourceOutMs) trim(clip.sourceInMs, value); }} /></label>
     </div>
@@ -733,6 +779,7 @@ function ClipInspector({ state, clip, dispatch, previewClip, setError }: { state
     <select className="w-full rounded-[5px] border border-[var(--line)] bg-[#0e1014] p-1.75 text-[11px]" aria-label="Transition type" disabled={!next} value={clip.transition.type} onChange={(event) => dispatch({ type: "set_transition", actor: "human", clipId: clip.id, transition: { type: event.target.value as Clip["transition"]["type"], durationMs: event.target.value === "cut" ? 0 : Math.max(300, clip.transition.durationMs) } })}>
       <option value="cut">Hard cut</option><option value="crossfade">Crossfade</option><option value="fade-black">Fade through black</option>
     </select>
+    <div className="mt-4 flex flex-wrap gap-2"><button className="rounded border border-[var(--line)] px-2 py-1 text-xs" onClick={() => dispatch({ type: "protect_segment", actor: "human", startMs: clip.sourceInMs, endMs: clip.sourceOutMs, label: "Protected by human" })}>Protect clip source</button><button className="rounded border border-[var(--line)] px-2 py-1 text-xs" onClick={() => void requestBroll({ startMs: clip.sourceInMs, endMs: clip.sourceOutMs }, dispatch, prompt).catch((error) => setError(String(error)))}>Add B-roll brief</button></div>
     {clip.transition.type !== "cut" && next && <RangeControl label="Duration" value={clip.transition.durationMs} resetValue={500} min={100} max={Math.min(3000, clipDuration(clip) / 2, clipDuration(next) / 2)} step={50} suffix="ms" onPreview={(durationMs) => preview({ transition: { ...clip.transition, durationMs } })} onCommit={(durationMs) => dispatch({ type: "set_transition", actor: "human", clipId: clip.id, transition: { ...clip.transition, durationMs } })} />}
   </div>;
 }
@@ -776,19 +823,56 @@ function formatTimelineTime(milliseconds: number) {
   return [Math.floor(seconds / 3600), Math.floor(seconds / 60) % 60, seconds % 60].map((part) => String(part).padStart(2, "0")).join(":");
 }
 
-type TimelineProps = { state: ProjectState; waveform: number[]; musicWaveform: number[]; musicPreview: { clipId: string; patch: Partial<MusicClip> } | null; snapEnabled: boolean; playheadMs: number; selectedClipId: string; selectedMusicId: string; selectedText: { kind: "caption" | "overlay"; id: string } | null; onSelect(id: string): void; onEditText(kind: "caption" | "overlay", id: string): void; onEditMusic(id: string): void; onClearSelection(): void; onSeek(ms: number): void; dispatch(command: CommandInput): ProjectState; setError(message: string): void };
-function Timeline({ state, waveform, musicWaveform, musicPreview, snapEnabled, playheadMs, selectedClipId, selectedMusicId, selectedText, onSelect, onEditText, onEditMusic, onClearSelection, onSeek, dispatch, setError }: TimelineProps) {
+type TimelineProps = { state: ProjectState; waveform: number[]; musicWaveform: number[]; musicPreview: { clipId: string; patch: Partial<MusicClip> } | null; snapping: ReturnType<typeof useTimelineSnapping>; bladeMode?: boolean; playheadMs: number; selectedClipId: string; selectedMusicId: string; selectedText: { kind: "caption" | "overlay"; id: string } | null; onSelect(id: string): void; onEditText(kind: "caption" | "overlay", id: string): void; onEditMusic(id: string): void; onClearSelection(): void; onSeek(ms: number): void; dispatch(command: CommandInput): ProjectState; setError(message: string): void };
+const linkedClipSelection = "after:pointer-events-none after:absolute after:inset-0 after:z-[4] after:rounded-[inherit] after:border after:border-[var(--lime)] after:bg-white/5";
+const lanes = { S1: { top: 0, height: 14 }, V2: { top: 14, height: 16 }, V1: { top: 30, height: 24 }, A1: { top: 54, height: 24 }, A2: { top: 78, height: 22 } } as const;
+export function Timeline({ state, waveform, musicWaveform, musicPreview, snapping, bladeMode = false, playheadMs, selectedClipId, selectedMusicId, selectedText, onSelect, onEditText, onEditMusic, onClearSelection, onSeek, dispatch, setError }: TimelineProps) {
   const [moving, setMoving] = useState<{ clipId: string; startMs: number } | null>(null);
   const [trimming, setTrimming] = useState<{ clipId: string; startMs: number; durationMs: number; sourceInMs: number; sourceOutMs: number } | null>(null);
   const [movingText, setMovingText] = useState<{ kind: "caption" | "overlay"; id: string; startMs: number; endMs: number } | null>(null);
   const [movingMusic, setMovingMusic] = useState<{ clipId: string; timelineStartMs: number; sourceInMs: number; sourceOutMs: number } | null>(null);
   const [trackWidth, setTrackWidth] = useState(0);
   const [viewportWidth, setViewportWidth] = useState(0);
+  const [trackHeight, setTrackHeight] = useState(240);
+  const [scrollTop, setScrollTop] = useState(0);
   const [zoom, setZoom] = useState(1);
   const scrollRef = useRef<HTMLDivElement>(null);
   const trackRef = useRef<HTMLDivElement>(null);
+  const bladeGuideRef = useRef<HTMLDivElement>(null);
+  const bladePointer = useRef<{ x: number; y: number } | null>(null);
   const entries = timelineClips(state);
   const total = timelineDuration(state);
+  // Move one lightweight guide, rather than rerendering every waveform on pointer movement.
+  useEffect(() => {
+    const track = trackRef.current, viewport = scrollRef.current, guide = bladeGuideRef.current;
+    if (!track || !viewport || !guide) return;
+    const refresh = () => {
+      guide.style.display = "none";
+      const point = bladePointer.current;
+      if (!bladeMode || !point) return;
+      const target = document.elementFromPoint(point.x, point.y)?.closest<HTMLElement>("[data-blade-kind]");
+      const rect = track.getBoundingClientRect();
+      if (!target || !track.contains(target) || !rect.width) return;
+      const time = Math.round((point.x - rect.left) / rect.width * total);
+      const kind = target.dataset.bladeKind!;
+      if (!bladeSplitCommand(state, kind, target.dataset.bladeId!, time)) return;
+      const lane = kind === "video" ? { top: lanes.V1.top, height: lanes.V1.height + lanes.A1.height }
+        : kind === "caption" ? lanes.S1 : kind === "overlay" ? lanes.V2 : lanes.A2;
+      Object.assign(guide.style, { display: "block", left: `${time / total * 100}%`, top: `${lane.top}%`, height: `${lane.height}%` });
+    };
+    const move = (event: PointerEvent) => { bladePointer.current = { x: event.clientX, y: event.clientY }; refresh(); };
+    const clear = () => { bladePointer.current = null; guide.style.display = "none"; };
+    track.addEventListener("pointermove", move);
+    track.addEventListener("pointerleave", clear);
+    viewport.addEventListener("scroll", refresh);
+    window.addEventListener("blur", clear);
+    refresh();
+    return () => {
+      track.removeEventListener("pointermove", move); track.removeEventListener("pointerleave", clear);
+      viewport.removeEventListener("scroll", refresh); window.removeEventListener("blur", clear);
+      guide.style.display = "none";
+    };
+  }, [bladeMode, state, total, trackWidth, trackHeight]);
   const naturalWidth = total / 1000 * 14;
   const width = Math.max(viewportWidth, naturalWidth * zoom);
   const majorSeconds = ([1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600] as const).find((seconds) => seconds * 1000 / total * width >= 72) ?? 600;
@@ -799,7 +883,7 @@ function Timeline({ state, waveform, musicWaveform, musicPreview, snapEnabled, p
     const track = trackRef.current;
     const viewport = scrollRef.current;
     if (!track || !viewport) return;
-    const observer = new ResizeObserver(() => { setTrackWidth(track.clientWidth); setViewportWidth(Math.max(1, viewport.clientWidth - 10)); });
+    const observer = new ResizeObserver(() => { setTrackWidth(track.clientWidth); setTrackHeight(track.clientHeight); setViewportWidth(Math.max(1, viewport.clientWidth - 10)); });
     observer.observe(track);
     observer.observe(viewport);
     setTrackWidth(track.clientWidth);
@@ -811,9 +895,10 @@ function Timeline({ state, waveform, musicWaveform, musicPreview, snapEnabled, p
     if (!container) return;
     const zoomTimeline = (event: WheelEvent) => {
       if (!event.altKey) {
-        if (container.scrollWidth <= container.clientWidth) return;
+        if (!event.shiftKey) return; // Native wheel/trackpad axes: regular wheel scrolls vertically.
         event.preventDefault();
-        container.scrollLeft += Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
+        const scale = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? container.clientWidth : 1;
+        container.scrollLeft += (Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY) * scale;
         return;
       }
       if (naturalWidth <= 0) return;
@@ -839,12 +924,16 @@ function Timeline({ state, waveform, musicWaveform, musicPreview, snapEnabled, p
     const right = left + container.clientWidth - 20;
     if (playheadX < left || playheadX > right) container.scrollLeft = Math.max(0, playheadX - 10);
   }, [playheadMs, total, trackWidth]);
+  const dragCleanup = useRef(() => {});
+  useEffect(() => () => dragCleanup.current(), []);
+  useEffect(() => { dragCleanup.current(); }, [bladeMode]);
   const trackDrag = (event: React.PointerEvent, update: (point: { clientX: number; altKey: boolean }) => void, finish: (point: { clientX: number; altKey: boolean }) => void) => {
+    dragCleanup.current();
     const originX = event.clientX;
     let point = { clientX: event.clientX, altKey: event.altKey };
     let dragging = false;
     let frame = 0;
-    const move = (pointer: PointerEvent) => { point = { clientX: pointer.clientX, altKey: pointer.altKey }; dragging ||= Math.abs(pointer.clientX - originX) > 2; update(point); };
+    const move = (pointer: PointerEvent) => { if (pointer.pointerId !== event.pointerId) return; point = { clientX: pointer.clientX, altKey: pointer.altKey }; dragging ||= Math.abs(pointer.clientX - originX) > 2; update(point); };
     const scroll = () => {
       const container = scrollRef.current;
       if (container && dragging) {
@@ -863,15 +952,22 @@ function Timeline({ state, waveform, musicWaveform, musicPreview, snapEnabled, p
       }
       frame = requestAnimationFrame(scroll);
     };
-    const up = (pointer: PointerEvent) => {
-      point = { clientX: pointer.clientX, altKey: pointer.altKey };
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-      cancelAnimationFrame(frame);
-      finish(point);
+    const cleanup = () => {
+      window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", cancel); window.removeEventListener("blur", cancel);
+      cancelAnimationFrame(frame); snapping.endDrag(); dragCleanup.current = () => {};
     };
+    const cancel = () => { cleanup(); setMoving(null); setTrimming(null); setMovingText(null); setMovingMusic(null); };
+    const up = (pointer: PointerEvent) => {
+      if (pointer.pointerId !== event.pointerId) return;
+      point = { clientX: pointer.clientX, altKey: pointer.altKey };
+      try { finish(point); } finally { cleanup(); }
+    };
+    dragCleanup.current = cancel;
+    snapping.beginDrag(() => update(point));
     window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up, { once: true });
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", cancel); window.addEventListener("blur", cancel);
     frame = requestAnimationFrame(scroll);
   };
   const moveClip = (event: React.PointerEvent<HTMLElement>, clip: Clip) => {
@@ -887,7 +983,7 @@ function Timeline({ state, waveform, musicWaveform, musicPreview, snapEnabled, p
       const scrollDelta = (scrollRef.current?.scrollLeft ?? 0) - startScroll;
       const raw = Math.max(0, originalStart + (pointer.clientX - startX + scrollDelta) / Math.max(1, trackWidth) * total);
       destination = raw;
-      if (snapEnabled !== pointer.altKey) {
+      if (snapping.current.current) {
         const threshold = 8 / Math.max(1, trackWidth) * total;
         const targets = [0, playheadMs, ...entries.filter((entry) => entry.clip.id !== clip.id).flatMap((entry) => [entry.startMs, entry.endMs])];
         let closest = threshold + 1;
@@ -919,7 +1015,7 @@ function Timeline({ state, waveform, musicWaveform, musicPreview, snapEnabled, p
     const calculate = (pointer: { clientX: number; altKey: boolean }) => {
       const scrollDelta = (scrollRef.current?.scrollLeft ?? 0) - startScroll;
       let timelineDelta = ((pointer.clientX - startX + scrollDelta) / timelineWidth) * total;
-      if (snapEnabled !== pointer.altKey) {
+      if (snapping.current.current) {
         const movingEdge = clip.timelineStartMs + (edge === "out" ? clipDuration(clip) : 0) + timelineDelta;
         const threshold = 8 / timelineWidth * total;
         const targets = [0, playheadMs, ...entries.filter((entry) => entry.clip.id !== clip.id).flatMap((entry) => [entry.startMs, entry.endMs])];
@@ -943,6 +1039,19 @@ function Timeline({ state, waveform, musicWaveform, musicPreview, snapEnabled, p
     };
     trackDrag(event, move, finish);
   };
+  const snapDelta = (delta: number, edges: number[], exclude: string) => {
+    if (!snapping.current.current) return delta;
+    const targets = [0, total, playheadMs,
+      ...entries.filter(({ clip }) => clip.id !== exclude).flatMap(({ startMs, endMs }) => [startMs, endMs]),
+      ...[...state.captions, ...state.overlays].filter((item) => item.id !== exclude).flatMap((item) => [item.startMs, item.endMs]),
+      ...state.music.filter((item) => item.id !== exclude).flatMap((item) => [item.timelineStartMs, musicClipEnd(state, item)])];
+    let distance = 8 / Math.max(1, trackWidth) * total, adjustment = 0;
+    for (const edge of edges) for (const target of targets) {
+      const difference = target - (edge + delta);
+      if (Math.abs(difference) <= distance) { distance = Math.abs(difference); adjustment = difference; }
+    }
+    return delta + adjustment;
+  };
   const dragText = (event: React.PointerEvent, kind: "caption" | "overlay", item: TimedText, edge: "move" | "in" | "out") => {
     if (event.button !== 0) return;
     event.preventDefault(); event.stopPropagation();
@@ -951,7 +1060,7 @@ function Timeline({ state, waveform, musicWaveform, musicPreview, snapEnabled, p
     let result = { kind, id: item.id, startMs: item.startMs, endMs: item.endMs };
     const calculate = (point: { clientX: number }) => {
       const scrollDelta = (scrollRef.current?.scrollLeft ?? 0) - startScroll;
-      const delta = (point.clientX - startX + scrollDelta) / Math.max(1, trackWidth) * total;
+      const delta = snapDelta((point.clientX - startX + scrollDelta) / Math.max(1, trackWidth) * total, edge === "move" ? [item.startMs, item.endMs] : [edge === "in" ? item.startMs : item.endMs], item.id);
       const duration = item.endMs - item.startMs;
       if (edge === "move") {
         const startMs = Math.max(0, Math.min(total - duration, item.startMs + delta));
@@ -976,7 +1085,8 @@ function Timeline({ state, waveform, musicWaveform, musicPreview, snapEnabled, p
     const result = { timelineStartMs: music.timelineStartMs, sourceInMs: music.sourceInMs, sourceOutMs: music.sourceOutMs };
     const calculate = (point: { clientX: number }) => {
       const scrollDelta = (scrollRef.current?.scrollLeft ?? 0) - startScroll;
-      const delta = (point.clientX - startX + scrollDelta) / Math.max(1, trackWidth) * total;
+      const end = music.timelineStartMs + (music.sourceOutMs - music.sourceInMs) / music.speed;
+      const delta = snapDelta((point.clientX - startX + scrollDelta) / Math.max(1, trackWidth) * total, edge === "move" ? [music.timelineStartMs, musicClipEnd(state, music)] : [edge === "in" ? music.timelineStartMs : end], music.id);
       if (edge === "move") result.timelineStartMs = Math.max(0, Math.min(total - 50, music.timelineStartMs + delta));
       else if (edge === "in") { const sourceChange = Math.max(-music.sourceInMs, Math.min(music.sourceOutMs - music.sourceInMs - 50, delta * music.speed)); result.sourceInMs = music.sourceInMs + sourceChange; result.timelineStartMs = Math.max(0, music.timelineStartMs + sourceChange / music.speed); }
       else result.sourceOutMs = Math.min(music.durationMs, Math.max(music.sourceInMs + 50, music.sourceOutMs + delta * music.speed));
@@ -999,7 +1109,7 @@ function Timeline({ state, waveform, musicWaveform, musicPreview, snapEnabled, p
       if (!track) return;
       const rect = track.getBoundingClientRect();
       let target = Math.max(0, Math.min(total, (point.clientX - rect.left) / rect.width * total));
-      if (snapEnabled !== point.altKey) {
+      if (snapping.current.current) {
         const threshold = 8 / rect.width * total;
         const targets = [0, total, ...entries.flatMap((entry) => [entry.startMs, entry.endMs]), ...state.captions.flatMap((item) => [item.startMs, item.endMs]), ...state.overlays.flatMap((item) => [item.startMs, item.endMs]), ...state.music.flatMap((item) => [item.timelineStartMs, musicClipEnd(state, item)])];
         const closest = targets.reduce((best, value) => Math.abs(value - target) < Math.abs(best - target) ? value : best, targets[0]);
@@ -1010,33 +1120,45 @@ function Timeline({ state, waveform, musicWaveform, musicPreview, snapEnabled, p
     update(event);
     trackDrag(event, update, update);
   };
-  const lanes = { S1: { top: 0, height: 14 }, V2: { top: 14, height: 16 }, V1: { top: 30, height: 24 }, A1: { top: 54, height: 24 }, A2: { top: 78, height: 22 } } as const;
-  return <div className="relative min-h-0 min-w-0 w-full overflow-hidden"><div className="pointer-events-none absolute top-[21px] bottom-[18px] left-0 z-[8] w-[46px] overflow-hidden rounded-l-[5px]">{(Object.entries(lanes) as Array<[keyof typeof lanes, { top: number; height: number }]>).map(([label, lane]) => <div key={label} className="absolute left-0 grid w-full place-items-center border-r border-[#343a44] bg-[#111419] font-mono text-[8px] text-[#8a919c]" style={{ top: `${lane.top}%`, height: `${lane.height}%` }}>{label}</div>)}</div><div ref={scrollRef} className="relative ml-[46px] h-full min-h-0 w-[calc(100%_-_46px)] min-w-0 select-none overflow-auto pt-[21px] pr-2.5 pb-2"><div ref={trackRef} className="timeline-track relative h-full min-h-[90px] min-w-full rounded-[5px] [background:repeating-linear-gradient(90deg,#15181d_0,#15181d_139px,#1d2127_140px)]" style={{ width }} onClick={onClearSelection}>
+  return <div className={`relative min-h-0 min-w-0 w-full flex-1 overflow-hidden ${bladeMode ? "[&_[data-blade-kind]]:!cursor-[url(/cursors/blade.svg)_8_22,crosshair] [&_[data-blade-kind]_*]:!cursor-[url(/cursors/blade.svg)_8_22,crosshair]" : ""}`} onPointerDownCapture={(event) => {
+    if (!bladeMode || event.button !== 0) return;
+    const target = (event.target as Element).closest<HTMLElement>("[data-blade-kind]");
+    const rect = trackRef.current?.getBoundingClientRect();
+    if (!target || !rect?.width) return;
+    event.preventDefault(); event.stopPropagation();
+    const command = bladeSplitCommand(state, target.dataset.bladeKind!, target.dataset.bladeId!, Math.round((event.clientX - rect.left) / rect.width * total));
+    if (command) { try { dispatch(command); if (command.type === "split_clip") onSelect(command.clipId); } catch (error) { setError(String(error)); } }
+  }} onClickCapture={(event) => {
+    if (bladeMode && (event.target as Element).closest("[data-blade-kind]")) { event.preventDefault(); event.stopPropagation(); }
+  }}><div className="pointer-events-none absolute top-[21px] bottom-[18px] left-0 z-[8] w-[46px] overflow-hidden rounded-l-[5px]"><div className="relative w-full" style={{ height: trackHeight, transform: `translateY(${-scrollTop}px)` }}>{(Object.entries(lanes) as Array<[keyof typeof lanes, { top: number; height: number }]>).map(([label, lane]) => <div key={label} className="absolute left-0 grid w-full place-items-center border-r border-[#343a44] bg-[#111419] font-mono text-[8px] text-[#8a919c]" style={{ top: `${lane.top}%`, height: `${lane.height}%` }}>{label}</div>)}</div></div><div ref={scrollRef} onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)} className="relative ml-[46px] h-full min-h-0 w-[calc(100%_-_46px)] min-w-0 select-none overflow-auto pt-[21px] pr-2.5 pb-2"><div ref={trackRef} className="timeline-track relative h-full min-h-[240px] min-w-full rounded-[5px] [background:repeating-linear-gradient(90deg,#15181d_0,#15181d_139px,#1d2127_140px)]" style={{ width }} onClick={onClearSelection}>
     <div className="absolute -top-[21px] left-0 z-[6] h-[21px] w-full overflow-hidden text-[8px] font-mono text-[#7f8590]" style={{ backgroundImage: "linear-gradient(to right, #3a4049 1px, transparent 1px)", backgroundSize: `${minorWidth}px 6px`, backgroundPosition: "left bottom", backgroundRepeat: "repeat-x" }}>
       {rulerMarks.map((time) => <span key={time} className="pointer-events-none absolute bottom-1 h-[17px] border-l border-[#68707c] pl-1 leading-none" style={{ left: `${time / total * 100}%` }}>{formatTimelineTime(time)}</span>)}
       <button type="button" aria-label="Scrub timeline" title="Click or drag to scrub" tabIndex={-1} className="absolute inset-0 size-full touch-none cursor-ew-resize select-none border-0 bg-transparent p-0 outline-none" onClick={(event) => event.stopPropagation()} onPointerDown={dragPlayhead} />
     </div>
     <div className="pointer-events-none absolute -top-[18px] -bottom-2.5 z-[7] w-0" style={{ left: `${Math.max(0, Math.min(total, playheadMs)) / Math.max(1, total) * 100}%` }}><svg className="absolute -left-2.5 top-0 h-full w-5 overflow-visible" aria-hidden="true"><line x1="10" x2="10" y1="0" y2="100%" stroke="var(--orange)" strokeWidth="1" shapeRendering="crispEdges" /><path d="M10 0 L17 7 L10 14 L3 7 Z" fill="var(--orange)" /></svg><button type="button" aria-label="Drag playhead" title="Drag playhead" tabIndex={-1} className="pointer-events-auto absolute top-0 left-0 inline-flex size-5 -translate-x-1/2 touch-none cursor-ew-resize select-none border-0 bg-transparent p-0 outline-none" onClick={(event) => event.stopPropagation()} onPointerDown={dragPlayhead} /></div>
-    {state.captions.map((item) => { const draft = movingText?.kind === "caption" && movingText.id === item.id ? movingText : item; return <div key={item.id} className={`group absolute z-[2] flex touch-none items-end overflow-hidden rounded border bg-[#6d5d1dcc] px-2 pb-1 text-[9px] leading-none text-[#fff2b3] ${selectedText?.kind === "caption" && selectedText.id === item.id ? "border-[var(--lime)] ring-1 ring-[var(--lime)]" : "border-[#d5b84a]"}`} style={{ top: `${lanes.S1.top}%`, height: `${lanes.S1.height}%`, left: `${draft.startMs / total * 100}%`, width: `${(draft.endMs - draft.startMs) / total * 100}%` }} onPointerDown={(event) => { onEditText("caption", item.id); dragText(event, "caption", item, "move"); }} onClick={(event) => event.stopPropagation()} onDoubleClick={(event) => { event.stopPropagation(); onEditText("caption", item.id); }}><button className="absolute inset-y-0 left-0 w-1.5 cursor-ew-resize border-0 bg-[#ffe066aa] p-0 opacity-0 group-hover:opacity-100" aria-label="Trim caption start" onPointerDown={(event) => dragText(event, "caption", item, "in")} /><span className="block overflow-hidden text-ellipsis whitespace-nowrap">{item.text}</span><button className="absolute inset-y-0 right-0 w-1.5 cursor-ew-resize border-0 bg-[#ffe066aa] p-0 opacity-0 group-hover:opacity-100" aria-label="Trim caption end" onPointerDown={(event) => dragText(event, "caption", item, "out")} /></div>; })}
-    {state.overlays.map((item) => { const draft = movingText?.kind === "overlay" && movingText.id === item.id ? movingText : item; return <div key={item.id} className={`group absolute z-[2] flex touch-none items-end overflow-hidden rounded border bg-[#243f69dd] px-2 pb-1 text-[9px] leading-none text-[#cde0ff] ${selectedText?.kind === "overlay" && selectedText.id === item.id ? "border-[var(--lime)] ring-1 ring-[var(--lime)]" : "border-[#5b8bd9]"}`} style={{ top: `${lanes.V2.top}%`, height: `${lanes.V2.height}%`, left: `${draft.startMs / total * 100}%`, width: `${(draft.endMs - draft.startMs) / total * 100}%` }} onPointerDown={(event) => { onEditText("overlay", item.id); dragText(event, "overlay", item, "move"); }} onClick={(event) => event.stopPropagation()} onDoubleClick={(event) => { event.stopPropagation(); onEditText("overlay", item.id); }}><button className="absolute inset-y-0 left-0 w-1.5 cursor-ew-resize border-0 bg-[#7aa8ffaa] p-0 opacity-0 group-hover:opacity-100" aria-label="Trim text start" onPointerDown={(event) => dragText(event, "overlay", item, "in")} /><span className="block overflow-hidden text-ellipsis whitespace-nowrap">{item.text}</span><button className="absolute inset-y-0 right-0 w-1.5 cursor-ew-resize border-0 bg-[#7aa8ffaa] p-0 opacity-0 group-hover:opacity-100" aria-label="Trim text end" onPointerDown={(event) => dragText(event, "overlay", item, "out")} /></div>; })}
-    {entries.map(({ clip, startMs, durationMs }, index) => <div key={clip.id} className="group absolute z-[2] touch-none cursor-grab active:cursor-grabbing" style={{ top: `${lanes.V1.top}%`, height: `${lanes.V1.height}%`, left: `${((moving?.clipId === clip.id ? moving.startMs : trimming?.clipId === clip.id ? trimming.startMs : startMs) / total) * 100}%`, width: `${((trimming?.clipId === clip.id ? trimming.durationMs : durationMs) / total) * 100}%` }} onPointerDown={(event) => { onSelect(clip.id); moveClip(event, clip); }} onClick={(event) => event.stopPropagation()}>
-      <button data-trim-handle className={`absolute top-0 left-0 z-[3] h-full w-[9px] cursor-ew-resize rounded-l border-0 bg-[var(--lime)] ${selectedClipId === clip.id ? "opacity-[.85]" : "opacity-0 group-hover:opacity-[.85]"}`} aria-label="Trim linked clip start" onClick={(event) => event.stopPropagation()} onPointerDown={(event) => trim(event, clip, "in")} />
-      <div className={`relative flex size-full items-end gap-2 overflow-hidden bg-gradient-to-br from-[#293341] to-[#1d252f] px-2.5 pb-1.5 ${index === 0 ? "rounded-l-[5px]" : ""} ${index === entries.length - 1 ? "rounded-r-[5px]" : ""} ${selectedClipId === clip.id ? "shadow-[inset_0_0_0_1px_var(--lime)]" : ""}`}><span className="font-mono text-[10px] text-[#c0c6cf]">{formatTime(trimming?.clipId === clip.id ? trimming.durationMs : durationMs)}</span>{clip.transition.type !== "cut" && <i className="ml-auto whitespace-nowrap text-[8px] not-italic text-[var(--orange)]">{clip.transition.type}</i>}</div>
-      <button data-trim-handle className={`absolute top-0 right-0 z-[3] h-full w-[9px] cursor-ew-resize rounded-r border-0 bg-[var(--lime)] ${selectedClipId === clip.id ? "opacity-[.85]" : "opacity-0 group-hover:opacity-[.85]"}`} aria-label="Trim linked clip end" onClick={(event) => event.stopPropagation()} onPointerDown={(event) => trim(event, clip, "out")} />
+    <div ref={bladeGuideRef} aria-hidden="true" className="pointer-events-none absolute z-[9] hidden w-0 border-l border-dotted border-[#e5ffad] drop-shadow-[0_0_1px_#000]" />
+    {state.captions.map((item) => { const draft = movingText?.kind === "caption" && movingText.id === item.id ? movingText : item; return <div key={item.id} data-blade-kind="caption" data-blade-id={item.id} className={`group absolute z-[2] flex touch-none items-end overflow-hidden rounded bg-[#6d5d1dcc] text-[9px] leading-none text-[#fff2b3] ring-1 ring-inset ${selectedText?.kind === "caption" && selectedText.id === item.id ? "ring-[var(--lime)]" : "ring-[#d5b84a]"}`} style={{ top: `${lanes.S1.top}%`, height: `${lanes.S1.height}%`, left: `${draft.startMs / total * 100}%`, width: `${(draft.endMs - draft.startMs) / total * 100}%` }} onPointerDown={(event) => { onEditText("caption", item.id); dragText(event, "caption", item, "move"); }} onClick={(event) => event.stopPropagation()} onDoubleClick={(event) => { event.stopPropagation(); onEditText("caption", item.id); }}><button className="absolute inset-y-0 left-0 w-1.5 cursor-ew-resize border-0 bg-[#ffe066aa] p-0 opacity-0 group-hover:opacity-100" aria-label="Trim caption start" onPointerDown={(event) => dragText(event, "caption", item, "in")} /><span className="block overflow-hidden px-2 pb-1 text-ellipsis whitespace-nowrap">{item.text}</span><button className="absolute inset-y-0 right-0 w-1.5 cursor-ew-resize border-0 bg-[#ffe066aa] p-0 opacity-0 group-hover:opacity-100" aria-label="Trim caption end" onPointerDown={(event) => dragText(event, "caption", item, "out")} /></div>; })}
+    {state.overlays.map((item) => { const draft = movingText?.kind === "overlay" && movingText.id === item.id ? movingText : item; return <div key={item.id} data-blade-kind="overlay" data-blade-id={item.id} className={`group absolute z-[2] flex touch-none items-end overflow-hidden rounded bg-[#243f69dd] text-[9px] leading-none text-[#cde0ff] ring-1 ring-inset ${selectedText?.kind === "overlay" && selectedText.id === item.id ? "ring-[var(--lime)]" : "ring-[#5b8bd9]"}`} style={{ top: `${lanes.V2.top}%`, height: `${lanes.V2.height}%`, left: `${draft.startMs / total * 100}%`, width: `${(draft.endMs - draft.startMs) / total * 100}%` }} onPointerDown={(event) => { onEditText("overlay", item.id); dragText(event, "overlay", item, "move"); }} onClick={(event) => event.stopPropagation()} onDoubleClick={(event) => { event.stopPropagation(); onEditText("overlay", item.id); }}><button className="absolute inset-y-0 left-0 w-1.5 cursor-ew-resize border-0 bg-[#7aa8ffaa] p-0 opacity-0 group-hover:opacity-100" aria-label="Trim text start" onPointerDown={(event) => dragText(event, "overlay", item, "in")} /><span className="block overflow-hidden px-2 pb-1 text-ellipsis whitespace-nowrap">{item.text}</span><button className="absolute inset-y-0 right-0 w-1.5 cursor-ew-resize border-0 bg-[#7aa8ffaa] p-0 opacity-0 group-hover:opacity-100" aria-label="Trim text end" onPointerDown={(event) => dragText(event, "overlay", item, "out")} /></div>; })}
+    {entries.map(({ clip, startMs, durationMs }, index) => <div key={clip.id} data-blade-kind="video" data-blade-id={clip.id} className="group absolute z-[2] touch-none cursor-grab active:cursor-grabbing" style={{ top: `${lanes.V1.top}%`, height: `${lanes.V1.height}%`, left: `${((moving?.clipId === clip.id ? moving.startMs : trimming?.clipId === clip.id ? trimming.startMs : startMs) / total) * 100}%`, width: `${((trimming?.clipId === clip.id ? trimming.durationMs : durationMs) / total) * 100}%` }} onPointerDown={(event) => { onSelect(clip.id); moveClip(event, clip); }} onClick={(event) => event.stopPropagation()}>
+      <button data-trim-handle className={`absolute top-0 left-0 z-[3] h-full w-[9px] cursor-ew-resize rounded-l border-0 bg-[var(--lime)] ${bladeMode ? "hidden" : selectedClipId === clip.id ? "opacity-[.85]" : "opacity-0 group-hover:opacity-[.85]"}`} aria-label="Trim linked clip start" onClick={(event) => event.stopPropagation()} onPointerDown={(event) => trim(event, clip, "in")} />
+      <div className={`relative flex size-full items-end gap-2 overflow-hidden bg-gradient-to-br from-[#293341] to-[#1d252f] px-2.5 pb-1.5 ${index === 0 ? "rounded-l-[5px]" : ""} ${index === entries.length - 1 ? "rounded-r-[5px]" : ""} ${selectedClipId === clip.id ? linkedClipSelection : ""}`}><span className="font-mono text-[10px] text-[#c0c6cf]">{formatTime(trimming?.clipId === clip.id ? trimming.durationMs : durationMs)}</span>{clip.transition.type !== "cut" && <i className="ml-auto whitespace-nowrap text-[8px] not-italic text-[var(--orange)]">{clip.transition.type}</i>}</div>
+      <button data-trim-handle className={`absolute top-0 right-0 z-[3] h-full w-[9px] cursor-ew-resize rounded-r border-0 bg-[var(--lime)] ${bladeMode ? "hidden" : selectedClipId === clip.id ? "opacity-[.85]" : "opacity-0 group-hover:opacity-[.85]"}`} aria-label="Trim linked clip end" onClick={(event) => event.stopPropagation()} onPointerDown={(event) => trim(event, clip, "out")} />
     </div>)}
-    {entries.map(({ clip, startMs, durationMs }) => <div key={`audio-${clip.id}`} className={`absolute z-[1] overflow-hidden rounded bg-[#18302f] ${selectedClipId === clip.id ? "shadow-[inset_0_0_0_1px_var(--lime)]" : ""}`} style={{ top: `${lanes.A1.top}%`, height: `${lanes.A1.height}%`, left: `${((moving?.clipId === clip.id ? moving.startMs : trimming?.clipId === clip.id ? trimming.startMs : startMs) / total) * 100}%`, width: `${((trimming?.clipId === clip.id ? trimming.durationMs : durationMs) / total) * 100}%` }} onClick={(event) => { event.stopPropagation(); onSelect(clip.id); }}><AudioWaveform peaks={waveform} clip={trimming?.clipId === clip.id ? { ...clip, sourceInMs: trimming.sourceInMs, sourceOutMs: trimming.sourceOutMs } : clip} durationMs={state.durationMs} />{clip.muted ? <VolumeX className="absolute top-1/2 right-2 size-3 -translate-y-1/2 text-[#829b96]" aria-hidden="true" /> : <Volume2 className="absolute top-1/2 right-2 size-3 -translate-y-1/2 text-[#76c7b7]" aria-hidden="true" />}</div>)}
-    {state.music.map((music) => { const previewed = musicPreview?.clipId === music.id ? { ...music, ...musicPreview.patch } : music; const draft = movingMusic?.clipId === music.id ? { ...previewed, ...movingMusic } : previewed; const end = musicClipEnd(state, draft); return <div key={music.id} className={`group absolute z-[2] flex touch-none cursor-grab items-end overflow-hidden rounded border bg-[#342450dd] ${selectedMusicId === music.id ? "border-[var(--lime)]" : "border-[#805fc0]"}`} style={{ top: `${lanes.A2.top}%`, height: `${lanes.A2.height}%`, left: `${draft.timelineStartMs / total * 100}%`, width: `${Math.max(0, end - draft.timelineStartMs) / total * 100}%` }} onPointerDown={(event) => { onEditMusic(music.id); dragMusic(event, music, "move"); }} onClick={(event) => event.stopPropagation()} onDoubleClick={(event) => { event.stopPropagation(); onEditMusic(music.id); }}><button className="absolute inset-y-0 left-0 z-[2] w-2 cursor-ew-resize border-0 bg-[#b38cffaa] p-0 opacity-0 group-hover:opacity-100" aria-label="Trim music start" onPointerDown={(event) => dragMusic(event, music, "in")} /><MusicWaveform peaks={musicWaveform} music={draft} timelineDurationMs={Math.max(0, end - draft.timelineStartMs)} /><span className="relative z-[1] mb-1 px-2 text-[9px] leading-none text-[#e1d2ff] text-shadow-[0_1px_2px_#000]">{music.name}{music.loop ? " · loop" : ""}</span><button className="absolute inset-y-0 right-0 z-[2] w-2 cursor-ew-resize border-0 bg-[#b38cffaa] p-0 opacity-0 group-hover:opacity-100" aria-label="Trim music end" onPointerDown={(event) => dragMusic(event, music, "out")} /></div>; })}
+    {entries.map(({ clip, startMs, durationMs }) => <div key={`audio-${clip.id}`} data-blade-kind="video" data-blade-id={clip.id} className={`absolute z-[1] overflow-hidden rounded bg-[#18302f] ${selectedClipId === clip.id ? linkedClipSelection : ""}`} style={{ top: `${lanes.A1.top}%`, height: `${lanes.A1.height}%`, left: `${((moving?.clipId === clip.id ? moving.startMs : trimming?.clipId === clip.id ? trimming.startMs : startMs) / total) * 100}%`, width: `${((trimming?.clipId === clip.id ? trimming.durationMs : durationMs) / total) * 100}%` }} onClick={(event) => { event.stopPropagation(); onSelect(clip.id); }}><AudioWaveform peaks={waveform} clip={trimming?.clipId === clip.id ? { ...clip, sourceInMs: trimming.sourceInMs, sourceOutMs: trimming.sourceOutMs } : clip} durationMs={state.durationMs} />{clip.muted ? <VolumeX className="absolute top-1/2 right-2 size-3 -translate-y-1/2 text-[#829b96]" aria-hidden="true" /> : <Volume2 className="absolute top-1/2 right-2 size-3 -translate-y-1/2 text-[#76c7b7]" aria-hidden="true" />}</div>)}
+    {state.music.map((music) => { const previewed = musicPreview?.clipId === music.id ? { ...music, ...musicPreview.patch } : music; const draft = movingMusic?.clipId === music.id ? { ...previewed, ...movingMusic } : previewed; const end = musicClipEnd(state, draft); return <div key={music.id} data-blade-kind="music" data-blade-id={music.id} className={`group absolute z-[2] flex touch-none cursor-grab items-end overflow-hidden rounded border bg-[#342450dd] ${selectedMusicId === music.id ? "border-[var(--lime)]" : "border-[#805fc0]"}`} style={{ top: `${lanes.A2.top}%`, height: `${lanes.A2.height}%`, left: `${draft.timelineStartMs / total * 100}%`, width: `${Math.max(0, end - draft.timelineStartMs) / total * 100}%` }} onPointerDown={(event) => { onEditMusic(music.id); dragMusic(event, music, "move"); }} onClick={(event) => event.stopPropagation()} onDoubleClick={(event) => { event.stopPropagation(); onEditMusic(music.id); }}><button className="absolute inset-y-0 left-0 z-[2] w-2 cursor-ew-resize border-0 bg-[#b38cffaa] p-0 opacity-0 group-hover:opacity-100" aria-label="Trim music start" onPointerDown={(event) => dragMusic(event, music, "in")} /><MusicWaveform peaks={musicWaveform} music={draft} timelineDurationMs={Math.max(0, end - draft.timelineStartMs)} /><span className="relative z-[1] mb-1 px-2 text-[9px] leading-none text-[#e1d2ff] text-shadow-[0_1px_2px_#000]">{music.name}{music.loop ? " · loop" : ""}</span><button className="absolute inset-y-0 right-0 z-[2] w-2 cursor-ew-resize border-0 bg-[#b38cffaa] p-0 opacity-0 group-hover:opacity-100" aria-label="Trim music end" onPointerDown={(event) => dragMusic(event, music, "out")} /></div>; })}
   </div></div></div>;
 }
 
-function TranscriptPanel({ state, transcript, playheadMs, dispatch, transcribeVideo, automaticStatus, seekTimeline, setError }: { state: ProjectState; transcript: TranscriptWord[]; playheadMs: number; dispatch(command: CommandInput): ProjectState; transcribeVideo(actor?: "human" | "agent", provider?: "cloudflare" | "openai", apiKey?: string, onProgress?: (message: string) => void): Promise<ProjectState>; automaticStatus: string; seekTimeline(ms: number): void; setError(message: string): void }) {
+export function TranscriptPanel({ state, transcript, playheadMs, dispatch, transcribeVideo, automaticStatus, transcriptionNotice, cancelTranscription, seekTimeline, setError }: { state: ProjectState; transcript: TranscriptWord[]; playheadMs: number; dispatch(command: CommandInput): ProjectState; transcribeVideo(actor?: "human" | "agent", provider?: "cloudflare" | "openai", apiKey?: string, onProgress?: (message: string) => void): Promise<ProjectState>; automaticStatus: string; transcriptionNotice?: string; cancelTranscription(): void; seekTimeline(ms: number): void; setError(message: string): void }) {
+  const { prompt, confirmation } = useConfirmation();
   const [query, setQuery] = useState("");
   const [selection, setSelection] = useState<[number, number] | null>(null);
   const [provider, setProvider] = useState<"cloudflare" | "openai">("cloudflare");
   const [apiKey, setApiKey] = useState("");
   const [rememberApiKey, setRememberApiKey] = useState(false);
   const [processing, setProcessing] = useState("");
-  const visible = transcript.filter((word) => !query || word.word.toLowerCase().includes(query.toLowerCase()));
+  const visible = transcript.map((word, index) => ({ word, index })).filter(({ word }) => !query || word.word.toLowerCase().includes(query.toLowerCase()));
+  const sourcePlayhead = timelineToSource(state, playheadMs)?.sourceMs;
 
   useEffect(() => {
     const saved = localStorage.getItem("rough-cut.openai-api-key");
@@ -1046,36 +1168,42 @@ function TranscriptPanel({ state, transcript, playheadMs, dispatch, transcribeVi
   async function transcribe() {
     setError("");
     try { await transcribeVideo("human", provider, apiKey, setProcessing); setProcessing(""); }
-    catch (cause) { setProcessing(""); setError(cause instanceof Error ? cause.message : "Transcription failed"); }
+    catch (cause) { setProcessing(""); if (!(cause instanceof DOMException && cause.name === "AbortError")) setError(cause instanceof Error ? cause.message : "Transcription failed"); }
   }
 
-  const selectedRange = selection && transcript.length ? { startMs: transcript[Math.min(...selection)].startMs, endMs: transcript[Math.max(...selection)].endMs } : null;
+  const firstSelected = selection ? transcript[Math.min(...selection)] : undefined;
+  const lastSelected = selection ? transcript[Math.max(...selection)] : undefined;
+  const selectedRange = firstSelected && lastSelected ? { startMs: firstSelected.startMs, endMs: lastSelected.endMs } : null;
   function generateCaptions() {
     dispatch({ type: "set_captions", actor: "human", items: captionsFromTranscript(state, transcript) });
   }
 
-  return <div>
+  return <div>{confirmation}
     <div className="sticky top-0 z-2 flex min-h-12 items-center gap-1.75 overflow-x-auto border-b border-[var(--line)] bg-[#13161bef] px-3 py-1.75 max-[900px]:flex-wrap">
       <input className="min-w-[180px] rounded-md border border-[var(--line)] bg-[#0b0d10] px-2.25 py-1.75 text-[11px] text-white" aria-label="Search transcript" placeholder="Search transcript" value={query} onChange={(event) => setQuery(event.target.value)} />
-      {transcript.length ? <>
+      {transcript.length > 0 && <>
         <button className="cursor-pointer whitespace-nowrap rounded-md border border-[#333944] bg-[#20242b] px-2.5 py-1.75 text-[10px]" disabled={!selectedRange} onClick={() => selectedRange && dispatch({ type: "protect_segment", actor: "human", ...selectedRange, label: "Protected by human" })}>Protect selection</button>
+        <button className="cursor-pointer rounded-md border border-[#333944] bg-[#20242b] px-2.5 py-1.75 text-[10px]" disabled={!selectedRange} onClick={() => selectedRange && void requestBroll(selectedRange, dispatch, prompt).catch((error) => setError(String(error)))}>Mark B-roll</button>
         <button className="cursor-pointer whitespace-nowrap rounded-md border border-[#333944] bg-[#20242b] px-2.5 py-1.75 text-[10px]" disabled={!selectedRange} onClick={() => selectedRange && dispatch({ type: "remove_segments", actor: "human", ranges: [selectedRange] })}>Cut selection</button>
         <button className="cursor-pointer whitespace-nowrap rounded-md border border-[#333944] bg-[#20242b] px-2.5 py-1.75 text-[10px]" onClick={generateCaptions}>{state.captions.length ? "Resync captions" : "Generate captions"}</button>
-      </> : <>
+      </>}
+      <>
         <select className="w-auto rounded-[5px] border border-[var(--line)] bg-[#0e1014] p-1.75 text-[11px]" aria-label="Transcription provider" value={provider} onChange={(event) => setProvider(event.target.value as typeof provider)}><option value="cloudflare">Cloudflare Whisper Large v3</option><option value="openai">OpenAI whisper-1 (your key)</option></select>
         {provider === "openai" && <><input className="min-w-[180px] rounded-md border border-[var(--line)] bg-[#0b0d10] px-2.25 py-1.75 text-[11px] text-white" aria-label="OpenAI API key" type="password" autoComplete="off" placeholder="OpenAI API key" value={apiKey} onChange={(event) => { const value = event.target.value; setApiKey(value); if (rememberApiKey) { if (value) localStorage.setItem("rough-cut.openai-api-key", value); else localStorage.removeItem("rough-cut.openai-api-key"); } }} /><label className="flex items-center gap-1.5 whitespace-nowrap text-[10px] text-[var(--muted)]"><input type="checkbox" checked={rememberApiKey} onChange={(event) => { setRememberApiKey(event.target.checked); if (event.target.checked && apiKey) localStorage.setItem("rough-cut.openai-api-key", apiKey); else localStorage.removeItem("rough-cut.openai-api-key"); }} />Remember on this device</label></>}
-        <button className="cursor-pointer whitespace-nowrap rounded-[7px] border-0 bg-[var(--lime)] px-[13px] py-2 text-xs font-extrabold text-[#10120d] hover:bg-[#e5ff93]" disabled={!!processing || !!automaticStatus || provider === "openai" && !apiKey} onClick={() => void transcribe()} aria-live="polite">{automaticStatus || processing || "Transcribe video"}</button>
-      </>}
+        <button className="cursor-pointer whitespace-nowrap rounded-[7px] border-0 bg-[var(--lime)] px-[13px] py-2 text-xs font-extrabold text-[#10120d] hover:bg-[#e5ff93]" disabled={!!processing || !!automaticStatus || provider === "openai" && !apiKey} onClick={() => void transcribe()} aria-live="polite">{automaticStatus || processing || (transcript.length ? "Continue / transcribe" : "Transcribe video")}</button>
+      </>
+      {automaticStatus && <button className="cursor-pointer rounded border border-[var(--line)] px-2 py-1 text-xs" onClick={cancelTranscription}>Cancel transcription</button>}
     </div>
-    {transcript.length ? <div className="p-3.5 leading-[2.05]">{visible.map((word) => {
-      const index = transcript.indexOf(word); const selected = selection && index >= Math.min(...selection) && index <= Math.max(...selection);
-      const current = word.startMs <= playheadMs && word.endMs >= playheadMs;
+    {transcriptionNotice && <p role="status" className="m-0 border-b border-[var(--line)] px-3 py-2 text-xs text-[var(--muted)]">{transcriptionNotice}</p>}
+    {transcript.length ? <div className="p-3.5 leading-[2.05]">{visible.map(({ word, index }) => {
+      const selected = selection && index >= Math.min(...selection) && index <= Math.max(...selection);
+      const current = sourcePlayhead !== undefined && word.startMs <= sourcePlayhead && sourcePlayhead < word.endMs;
       return <button key={word.id} aria-pressed={!!selected} className={`cursor-pointer rounded-[3px] border-0 px-1 py-0.75 hover:bg-[#2c3139] ${selected ? "bg-[#5d681f] text-white" : "bg-transparent text-[#c7cad0]"} ${current ? "!text-[var(--lime)]" : ""}`} onClick={(event) => { if (event.shiftKey && selection) setSelection([selection[0], index]); else setSelection([index, index]); const clip = timelineClips(state).find((entry) => word.startMs >= entry.clip.sourceInMs && word.startMs <= entry.clip.sourceOutMs); if (clip) seekTimeline(clip.startMs + (word.startMs - clip.clip.sourceInMs) / clip.clip.speed); }}>{word.word}</button>;
     })}</div> : <div className="p-8 text-center text-xs text-[var(--muted)]">Transcribe to unlock text search, transcript cuts, and automatic captions.</div>}
   </div>;
 }
 
-function TextPanel({ state, playheadMs, dispatch }: { state: ProjectState; playheadMs: number; dispatch(command: CommandInput): ProjectState }) {
+export function TextPanel({ state, playheadMs, dispatch }: { state: ProjectState; playheadMs: number; dispatch(command: CommandInput): ProjectState }) {
   const [text, setText] = useState("");
   const add = () => {
     if (!text.trim()) return;
@@ -1088,32 +1216,50 @@ function TextPanel({ state, playheadMs, dispatch }: { state: ProjectState; playh
   </form>;
 }
 
-function MusicPanel({ projectId, state, requested, onRequestComplete, dispatch, setError }: { projectId: string; state: ProjectState; requested: boolean; onRequestComplete(): void; dispatch(command: CommandInput): ProjectState; setError(message: string): void }) {
+export function MusicPanel({ projectId, local, state, requested, onRequestComplete, dispatch, setError }: { projectId: string; local: boolean; state: ProjectState; requested: boolean; onRequestComplete(): void; dispatch(command: CommandInput): ProjectState; setError(message: string): void }) {
   const [uploading, setUploading] = useState(false);
+  const pendingUpload = useRef<AbortController | null>(null);
+  useEffect(() => {
+    setUploading(false);
+    return () => { pendingUpload.current?.abort(); pendingUpload.current = null; };
+  }, [projectId, state.music.length]);
   const chooserRef = useRef<HTMLLabelElement>(null);
   useEffect(() => {
     if (!requested || state.music.length) return;
     requestAnimationFrame(() => { chooserRef.current?.scrollIntoView({ behavior: "smooth", block: "center" }); chooserRef.current?.focus({ preventScroll: true }); });
   }, [requested, state.music.length]);
   const upload = async (file?: File) => {
-    if (!file) return;
+    if (!file || pendingUpload.current) return;
+    const controller = new AbortController();
+    pendingUpload.current = controller;
     setUploading(true); setError("");
-    const url = URL.createObjectURL(file);
     try {
-      const durationMs = await new Promise<number>((resolve, reject) => { const audio = new Audio(url); audio.onloadedmetadata = () => resolve(Math.round(audio.duration * 1000)); audio.onerror = () => reject(new Error("Could not read audio duration")); });
-      const form = new FormData(); form.set("music", file);
-      const response = await fetch(`/api/projects/${projectId}/music`, { method: "POST", body: form });
-      const result = await response.json() as { id?: string; error?: string };
-      if (!response.ok || !result.id) throw new Error(result.error || "Music upload failed");
-      dispatch({ type: "set_music", actor: "human", music: { assetId: result.id, name: file.name, durationMs, timelineStartMs: 0, sourceInMs: 0, sourceOutMs: durationMs, speed: 1, volume: 0.3, muted: false, fadeInMs: 500, fadeOutMs: 500, loop: durationMs < timelineDuration(state) } });
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "Music upload failed"); }
-    finally { URL.revokeObjectURL(url); setUploading(false); }
+      // Inspect the actual track/configuration before any local or legacy-cloud
+      // asset is stored. Failed validation leaves the current project unchanged.
+      const { durationMs } = await inspectMediaSource(file, "audio", controller.signal);
+      controller.signal.throwIfAborted();
+      let assetId: string;
+      if (local) assetId = await addLocalMusic(projectId, file);
+      else {
+        const form = new FormData(); form.set("music", file);
+        const response = await fetch(`/api/projects/${projectId}/music`, { method: "POST", body: form, signal: controller.signal });
+        const result = await response.json() as { id?: string; error?: string };
+        if (!response.ok || !result.id) throw new Error(result.error || "Music upload failed");
+        assetId = result.id;
+      }
+      controller.signal.throwIfAborted();
+      dispatch({ type: "set_music", actor: "human", music: { assetId, name: file.name, durationMs, timelineStartMs: 0, sourceInMs: 0, sourceOutMs: durationMs, speed: 1, volume: 0.3, muted: false, fadeInMs: 500, fadeOutMs: 500, loop: durationMs < timelineDuration(state) } });
+    } catch (cause) { if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : "Music upload failed"); }
+    finally {
+      if (pendingUpload.current === controller) pendingUpload.current = null;
+      if (!controller.signal.aborted) setUploading(false);
+    }
   };
   if (state.music.length) return <p className="m-0 p-8 text-center text-xs text-[var(--muted)]">Music is imported. Select an A2 clip on the timeline to adjust it in the Inspector.</p>;
   return <div className="grid place-items-center gap-3 p-8 text-center"><p className="m-0 text-xs text-[var(--muted)]">Import one background-music file to the A2 track.</p><label ref={chooserRef} tabIndex={-1} className={`cursor-pointer rounded-[7px] bg-[var(--lime)] px-4 py-2 text-xs font-extrabold text-[#10120d] outline-none ${requested ? "animate-pulse ring-2 ring-white ring-offset-2 ring-offset-[#13161b] motion-reduce:animate-none" : ""}`}>{uploading ? "Uploading…" : "Choose music"}<input className="hidden" type="file" accept="audio/*" disabled={uploading} onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ""; if (file) { onRequestComplete(); void upload(file); } }} /></label></div>;
 }
 
-function SilencePanel({ transcript, detect, dispatch, setError }: { transcript: TranscriptWord[]; detect(threshold: number, minimum: number): Promise<Array<{ startMs: number; endMs: number }>>; dispatch(command: CommandInput): ProjectState; setError(message: string): void }) {
+export function SilencePanel({ transcript, detect, dispatch, setError }: { transcript: TranscriptWord[]; detect(threshold: number, minimum: number): Promise<Array<{ startMs: number; endMs: number }>>; dispatch(command: CommandInput): ProjectState; setError(message: string): void }) {
   const [threshold, setThreshold] = useState(-35); const [minimum, setMinimum] = useState(500); const [padding, setPadding] = useState(200);
   const [detected, setDetected] = useState<Array<{ startMs: number; endMs: number }>>([]); const [excluded, setExcluded] = useState<Set<string>>(new Set()); const [working, setWorking] = useState(false);
   const ranges = useMemo(() => excludeTranscriptFromSilences(detected, transcript, padding, minimum), [detected, transcript, padding, minimum]);
@@ -1127,4 +1273,4 @@ function SilencePanel({ transcript, detect, dispatch, setError }: { transcript: 
   return <div className="p-3"><div className="grid grid-cols-[repeat(3,minmax(130px,1fr))_auto] items-end gap-[18px] max-[900px]:grid-cols-2"><RangeControl label="Threshold" value={threshold} resetValue={-35} min={-60} max={-10} step={1} suffix="dB" onCommit={setThreshold} /><RangeControl label="Minimum" value={minimum} resetValue={500} min={100} max={3000} step={100} suffix="ms" onCommit={setMinimum} /><RangeControl label="Speech padding" value={padding} resetValue={200} min={0} max={500} step={25} suffix="ms" onCommit={setPadding} /><button className="cursor-pointer rounded-[7px] border-0 bg-[var(--lime)] px-[13px] py-2 text-xs font-extrabold text-[#10120d] hover:bg-[#e5ff93]" disabled={working} onClick={() => void scan()} aria-live="polite">{working ? "Scanning audio…" : "Find silences"}</button></div>{ranges.length > 0 && <><div className="my-3 grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-1.5">{ranges.map((range) => { const key = keyOf(range); return <label className="flex items-center gap-2 rounded-[5px] border border-[var(--line)] p-2 text-[10px]" key={key}><input type="checkbox" checked={!excluded.has(key)} onChange={() => setExcluded((current) => { const next = new Set(current); if (next.has(key)) next.delete(key); else next.add(key); return next; })} /><span className="flex-1 text-[#bdc1c8]">{formatTime(range.startMs)} → {formatTime(range.endMs)}</span><b className="text-[var(--lime)]">{((range.endMs - range.startMs) / 1000).toFixed(1)}s</b></label>; })}</div><button className="cursor-pointer whitespace-nowrap rounded-md border border-[#333944] bg-[#20242b] px-2.5 py-1.75 text-[10px]" onClick={apply}>Remove {selectedCount} selected silences</button></>}</div>;
 }
 
-function ActivityPanel({ state }: { state: ProjectState }) { return <div className="px-3.5 py-2.5">{state.activity.length ? state.activity.map((item) => <div className="flex gap-2.5 border-b border-[#20242a] py-1.75" key={item.id}><span className={`grid size-[25px] place-items-center rounded-full text-[9px] uppercase ${item.actor === "agent" ? "bg-[#3c451d] text-[var(--lime)]" : "bg-[#29303a]"}`}>{item.actor.slice(0, 1)}</span><p className="m-0 flex flex-col gap-0.75 text-[11px]"><b>{item.summary}</b><small className="text-[9px] text-[var(--muted)]">{new Date(item.at).toLocaleTimeString()}</small></p></div>) : <p className="p-8 text-center text-xs text-[var(--muted)]">Edits from you and your agent will appear here.</p>}</div>; }
+export function ActivityPanel({ state }: { state: ProjectState }) { return <div className="px-3.5 py-2.5">{state.activity.length ? state.activity.map((item) => <div className="flex gap-2.5 border-b border-[#20242a] py-1.75" key={item.id}><span className={`grid size-[25px] place-items-center rounded-full text-[9px] uppercase ${item.actor === "agent" ? "bg-[#3c451d] text-[var(--lime)]" : "bg-[#29303a]"}`}>{item.actor.slice(0, 1)}</span><p className="m-0 flex flex-col gap-0.75 text-[11px]"><b>{item.summary}</b><small className="text-[9px] text-[var(--muted)]">{new Date(item.at).toLocaleTimeString()}</small></p></div>) : <p className="p-8 text-center text-xs text-[var(--muted)]">Edits from you and your agent will appear here.</p>}</div>; }

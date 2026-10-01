@@ -1,146 +1,102 @@
-# ROUGH//CUT
+# ROUGH//CUT — concise working brief
 
-> Living project brief. Read before working and update it whenever scope, architecture, tools, or deployment decisions change.
+Keep this file current: replace stale decisions rather than appending a session transcript.
 
-## Mission
+## Critical deployment boundary
 
-Build a production-ready, human-first, WebMCP-native video editor for **The WebMCP Challenge** (deadline: **4 September 2026, 01:30 IST**). The goal is a winning submission, not a mocked proof of concept.
+- Hackathon is over; owner authorized consolidating source/history into the original GitHub `rough-cut` repo. **Source consolidation does NOT authorize changing the original `rough-cut` Worker or its resources.** Keep live deployment targeting `rough-cut-improvements` with its isolated D1/cache resources and custom domain.
+- An erroneous improvements deployment to `rough-cut` was rolled back at owner's urgent request. Verified original version `eddee2c1-7a9c-4a12-b3a0-27ee80b55388` serves100% traffic and original URL returnsHTTP200. No GitHub push occurred.
+- Rollback does not undo bound-resource changes: additive migrations0002/0003 remain in original `rough-cut-db`; OpenNext deployment also populated the shared cache bucket. Do not drop tables, restore the DB blindly or delete cache data during judging. No existing project/media data was intentionally changed/deleted.
+- Improvements now deployed separately: Worker/self-reference `rough-cut-improvements`, D1 `rough-cut-improvements-db` (`893e5547-1671-4325-8ebf-66ad34eb93f1`), cache `rough-cut-improvements-cache`, legacy-media binding `rough-cut-improvements-media`. OUTPUTS remains the dedicated improvements bucket `rough-cut-outputs`. Original MEDIA_WORKER_URL removed from production config; do not bind/call the original media Worker. Root migration scripts now target the new DB. DNS zone `awesamarth.dev` is now active on Cloudflare; existing website/email DNS records were verified against Namecheap before the owner switched nameservers. Custom hostname `rough-cut.awesamarth.dev` is attached ONLY to `rough-cut-improvements`. DNSSEC remains off pending separate re-enablement.
 
-A human supplies taste and manually edits when desired. Any WebMCP-compatible external agent performs precise, visible, reversible edits through structured tools. **ROUGH//CUT has no built-in agent or chat.**
+## Current handoff
 
-## Product promise
+- Canonical repo: `/Users/awesamarth/Desktop/code/rough-cut`, branch `main`.
+- Canonical remote: `https://github.com/awesamarth/rough-cut.git`.
+- Owner authorized committing improvements and merging/pushing the full history to the original repo. Preserve ignored `reddit-post.md`, env files and unrelated `youtube-thumbnail.png`. Duplicate improvements checkout is retained as a backup until consolidation is verified; it is not the canonical checkout.
+- Pre-codec checkpoint: **`19bda64`** (`Checkpoint local-first editor before codec extensions`). Local commit only; not pushed. Unrelated `youtube-thumbnail.png` remains untracked—preserve it.
+- **Improvements live:** https://rough-cut.awesamarth.dev (workers.dev URL also retained) — version `ea319612-1b57-4a70-92b9-6d4609b22f6a` (2026-09-17; favicon swapped to R//C. logo, only `/favicon.ico`+`/BUILD_ID` assets changed vs prior). Custom-domain HTTP200/TLS verification passed; Cloudflare domain mapping confirms service `rough-cut-improvements`. Original Worker version rechecked unchanged after domain deployment. New isolated DB migrations0001–0003 applied. Limits600transcription minutes/day,120requests/day; Containers disabled. New home/editor HTTP200, empty-project API404; original site HTTP200 and original version still100% traffic verified after this deployment. Deployment preceded the source-consolidation commit; live code and git history are being reconciled in the original repo.
+- Owner reports successful long export and positive transcription-fix testing locally. Production HTTP checks pass: home/editor/assets200, invalid transcription/output requests400 before admission, Container export503, unknown job410. No live inference, paid rendering, browser automation or production full-media test run. Custom domain is now active; original hackathon Worker remains unchanged since restoration.
+- **Local codec implementation authorized.** Native-first, actual-track capability checks and lazy Mediabunny extensions are implemented. Luna 5.6 high wrote the first pass; parent reviewed and fixed cancellation/relink/state-change races and expanded validation. Codec policy code (`codec-support.ts`: `ensureTrackDecodable`, H.264/AAC output checks) verified present in the live-served JS bundle on2026-09-17, so the Sept16 deploy included it despite remaining uncommitted. Exact real-file ProRes/AC-3/DTS/AAC browser validation remains owner-manual work. No cloud codec fallback is enabled. Deployments build from the disk working tree, not git—git status alone does not indicate what is live.
+- **Cloud codec/rendering fallback is backlog only. Do not implement or enable it now.** R2 output storage is separate and already enabled.
+- Production build uses Webpack with owner approval. Both Next compilers corrupted ProRes template escapes; fixed via package-scoped `prores-build-loader.cjs` lowering templates while preserving payload bytes (also configured for dev Turbopack). OpenNext build passes, generated browser/server JS parses, transformed-package ProRes/WASM probe passes. Deployed Worker gzip2301KiB. No broad codec/renderer rewrite.
+- Development server: tmux `rough-cut-dev`, `http://localhost:3007`, bound to `127.0.0.1`. Owner-requested restart alone retained Turbopack's `conflicting effects for the same key` HMR loop/title flicker. Moving generated `.next/dev` to `/tmp/rough-cut-dev-cache.fg3zia/dev` and restarting produced clean startup/HTTP200; recurrence needs owner confirmation. No app/browser-storage changes. Do not restart unnecessarily.
 
-Upload one real interview, podcast, tutorial, or product demo. ROUGH//CUT transcribes it and presents a synchronized video, transcript, and timeline. Humans and agents edit the same project through the same command layer.
+## Owner rules
 
-```text
-Human controls ─┐
-                ├─ editing commands → versioned project → timeline/export
-WebMCP tools ───┘
-```
+- Be concise; use existing design/components and minimal justified changes. Prefer Bun/Bunx and `rg`.
+- **No automatic browser tests** (Chrome/Brave included). Owner performs manual checks; give a short checklist after UI changes. Browser automation requires explicit permission. Non-browser tests/typecheck/lint/build allowed; no unrelated long export tests.
+- **No subagents unless explicitly authorized for the current task.** Prior Sol export and Luna codec authorizations were task-specific, not standing permission.
+- No deployment, push, remote D1 migration, destructive cloud changes or paid tests without authorization. Containers remain disabled.
+- Preserve unrelated work. Keep secrets out of commits/logs/docs; `.env.local` and `.dev.vars` are ignored.
+- No backward-compatibility workstream, legacy cleanup project or unrelated rewrite. App is publicly deployed; keep changes scoped and validate before any separately authorized deployment.
+- Use Tailwind; shared styled modals, never browser alert/confirm/prompt. Browser-mandated beforeunload warning is the exception.
 
-## Non-negotiables
+## Product and architecture
 
-- One immutable source video plus one optional background-music asset is the deliberate v1 scope.
-- Human UX must be complete; this is agent-native, not agent-only.
-- Real uploads, transcription, persistence, processing, and exports—no fake tool results.
-- Agent actions visibly update the editor and remain undoable.
-- Use direct `document.modelContext.registerTool`; support every compliant external agent.
-- Source media is immutable; all editing is non-destructive.
-- MP4 and EDL exports stay in scope.
-- Use Tailwind utility classes in JSX for component and layout styling. Touch `globals.css` only for root tokens, base resets, keyframes, or selectors that Tailwind cannot express cleanly; do not add component-specific CSS there.
+Human-first, local-first, non-destructive video editor. No login required for ordinary editing. No built-in chatbot/agent: external WebMCP tools edit the same visible state through direct `document.modelContext.registerTool`.
 
-## Human editor
+- One immutable source video plus optional background music, splittable into timeline clips.
+- Fixed lanes: S1 captions, V2 overlays, V1 video, A1 linked source audio, A2 music. Not a general multi-source compositor.
+- Preserve gaps, trims, speed/pitch, transitions/fades, transforms/color, text anchors, transcript editing, protected ranges, B-roll briefs, undo/redo and human/agent parity.
+- Shared pure engine → versioned local persistence → shared composition for preview, exact-frame inspection and export. Human and WebMCP mutations use the same dispatch; tools require expected versions and await durability.
+- Source Files stay on disk, accessed through browser File/Blob reads; no automatic whole-source upload or OPFS copy. Reload may require relinking. Browser storage can be evicted; backups matter.
+- Bounded decode/encode queues and streaming output. Close samples/readers; no entire recording in RAM or MediaRecorder export.
 
-- Video preview with draggable playhead and exact timecode.
-- Transcript selection for splitting, deleting, and protecting ranges.
-- Timeline with trim handles and drag-to-reorder clips.
-- Inspector for brightness, contrast, saturation, hue, volume/mute, and speed.
-- Cuts, crossfades, fade-to-black, fade-in, and fade-out.
-- Editable caption and text-overlay lanes, caption styling, and B-roll markers/briefs.
-- A linked source-audio lane plus one independent background-music lane with trim, move, loop, volume, mute, and fades.
-- Silence suggestions that can be reviewed before removal.
-- Undo/redo, autosave, edit history, and an agent-activity feed.
-- Keyboard editing follows NLE conventions: Backspace lift-deletes and leaves the gap; Delete ripple-deletes and closes the removed span.
+### Key implementation paths
 
-## Editing model
+- Active UI: `src/components/editor-shell.tsx`; `editor.tsx` retains reused Timeline/inspectors/panels and an unrouted old controller.
+- Editing/persistence: `src/lib/editor.ts`, `local-store.ts`, `save-queue.ts`, `recovery.ts`, `src/components/use-editor.ts`.
+- Rendering: `composition.ts`, `video-renderer.ts`, `audio-renderer.ts`, `src/components/use-timeline-player.ts`.
+- Export: `browser-export.ts`, `export.worker.ts`, `local-export.ts`, `export-destination.ts`, `src/components/export-library.tsx`.
+- Analysis/transcription: `media-analysis.worker.ts`, `browser-audio.ts`, `transcription-audio.ts`, `src/components/use-transcription.ts`.
+- Cloud output: `cloud-output-{client,writer}.ts`, `cloud-outputs.ts`, `/api/outputs`, migration `0003_cloud_outputs.sql`.
 
-- Transcript words have stable IDs, source timestamps, and confidence where available.
-- Clips reference `[sourceInMs, sourceOutMs)` ranges from the immutable source.
-- Timeline positions derive from clip order and transition durations.
-- Captions, protected ranges, and B-roll markers anchor to words/clips so they survive reordering.
-- Fixed semantic lanes are S1 subtitles, V2 text/graphics, V1 source video, A1 linked source audio, and A2 background music; this is not a general multi-track compositor.
-- Every mutation increments `project_version` and stores enough history for undo/redo.
-- Mutating tools receive `expected_version`. If the human changed version 12 to 13, an agent call expecting 12 is rejected as stale and must reread before retrying.
+## Important shipped behavior
 
-## WebMCP tools
+- Mediabunny installed at 1.55.7; SoundTouch supplies pitch-preserving retiming. Shared canonical output: 1920×1080, 30fps, H.264 8Mbps + stereo 48kHz AAC 192kbps.
+- AAC priming is measured and corrected with MP4 edit lists; packet-scanned duration can include padding beyond actual presentation duration. Preserve this correction when adding encoders.
+- Local IndexedDB project/history persistence, relinking, backups/import, stale-write rejection and fail-stop pending recovery. History bounded to 100 steps / 16MiB; do not erase pending work on save failure.
+- Transcription now unions retained clip source ranges (not original duration), chunks at ≤5 source minutes and preserves source timestamps through cuts/reorder/speed. Every completed nonempty chunk merges with unprocessed words and saves durably under the cross-tab lock. Range-keyed v3 cache reuses covering v2 results; no silent paid retries. Cancel/failure retains completed results; UI shows neutral “Cancelled.”/“Cancelled. Completed transcription saved.” and keeps Continue/transcribe available. External edits stop stale application; save failures retain existing recovery safeguards. Local audio preparation still preserves gaps/phase-inverted speech.
+- Auto-transcription defaults off; remembered opt-in applies once to new uploads only. Manual transcription still requires consent. Reopen/import/failure never silently retriggers it.
+- Single Export MP4 filename flow: genuine direct-save picker first; otherwise safety-adjusted OPFS quota decision. Unknown quota tries local, never implies upload permission. Known insufficient space offers styled cloud consent.
+- Actual OPFS quota failure can offer explicit cloud retry only after successful temporary-file cleanup. Tag errors at file-operation boundaries: decoder/encoder QuotaExceededError is NOT storage failure. Picker cancellation, render/codec failures, direct-file errors and cancellation never trigger cloud upload.
+- Export snapshot/version/media/filename, single-flight and cancellation guards survive async prompts. WebMCP export is local-only; agents cannot supply human cloud consent.
+- Saved exports support Download/recovery/deletion. **Share removed entirely at owner request**; no Share testing or replacement advice needed.
+- Preview/timeline/lower panes resize vertically; Inspector resizes horizontally (default270px, limits220–520px, preview minimum320px). Keyboard arrows and pointer cleanup retained; narrow screens stack.
+- B toggles Blade mode; A/Escape exits. Pointer cuts clicked item at the guide, including linked V1/A1; separate Split button cuts at playhead. N toggles snapping persistently when idle, temporarily for an active drag (until completion/cancel, not key release).
+- Space toggles playback and blurs focused controls; typing/modals retain native behavior. Backspace lift-deletes; Delete ripple-deletes. Alt+wheel zooms; Shift+wheel pans.
+- Captions use bundled Inter600; overlays DejaVu Bold. Shared measured-glyph text layout. Tiny timeline text boxes use true duration width, with inner padding/inset outlines. V1/A1 selections highlight together.
+- Renderer disposal waits for pending draws, returns all prefetched-frame iterators, then disposes input. Async cleanup must remain idempotent and destination cleanup must still run on failure.
+- PCM timestamps only clamp negative round-off within1ns; genuinely invalid negatives remain errors.
 
-Keep schemas narrow, validate all input, and return the new version plus a structured human-readable diff.
+## Cloud authorization and boundaries
 
-### Start
+- Normal editing, preview, analysis and browser export never start a Container. No silent paid retries or full-source uploads.
+- Workers AI transcription enabled locally and in production with explicit owner approval:600minutes/day,120requests/day, per D1 environment (not a combined account cap). Production value in wrangler.jsonc; local cloud dev remains opt-in via ignored env files. Consent required unless explicitly opted into new-upload auto-transcription.
+- R2 rendered-output storage explicitly authorized/enabled: dedicated Standard bucket `rough-cut-outputs`, `OUTPUTS` remote binding. Existing `MEDIA` bucket untouched. Browser still renders; only encoded MP4 bytes upload.
+- Configured R2 prefix `rough-cut-output/` has verified two-day expiry. Limits:4GiB/output,8GiB/day,20admissions/day,2concurrent uploads,1pending part/output,1hour upload,24hour access,10download requests. Failed reservations are not refunded. Lifecycle expiry may lag.
+- Cloud output uses bounded5MiB chunks/header-tail correction and scoped HttpOnly/SameSite cookies; no capability in URL/JS persistence. Download streams with ranges. Origin validation uses actual Host, not forwarded-host.
+- Migrations0002/0003 applied to both local and remote D1. `CLOUD_EXPORTS_DAILY_LIMIT=0`; production Container export endpoint verified503 before proxying. Cloud-dev proxy initializes only in development.
+- Local D1 budgets are NOT account-wide spending caps. Workers plan/free credits do not cap all AI/R2/Container charges. Verify current official pricing/limits before changing allowances.
+- Prior tiny generated MP4 passed actual remote R2 upload/download/range/auth/delete checks; this is not proof of large browser-rendered output or embedded-cookie behavior.
 
-- `request_video_upload` (landing page; focuses and highlights the human-operated upload control)
+## Local codec implementation
 
-### Inspect
+- `codec-support.ts` shares actual-track checks across source/music acceptance, relink, preview, audio, analysis and export. No audio is valid for video; existing unsupported audio is rejected. These are capability checks, not exhaustive file-integrity validation.
+- Exact extensions1.55.7: `@mediabunny/prores` (ProRes decode), `@mediabunny/ac3` (AC-3/E-AC-3 decode), `@mediabunny/dts` (DTS decode), `@mediabunny/aac-encoder` (missing AAC encoding). Core remains1.55.7, TurboRes resolves1.2.2. Native support short-circuits lazy realm-local single-flight registration; failed registrations can retry.
+- Every relevant worker initializes its own policy. Cancellation stops callers without breaking another caller's shared import. Upload/music/relink validation guards unmount/supersession; durations normalize to integer milliseconds. No blind isolation-header changes.
+- H.264/AAC output checks precede rendering/R2 admission, with snapshot/cancel rechecks after async loading. AAC registration precedes the existing measured priming probe. Real browser extension-backed A/V sync remains unverified.
+- Extensions do not cover every codec/profile/container; raw AC3/DTS files are not automatically demuxable just because their codec is supported. Unsupported HEVC/H.264 configurations remain unsupported. Cloud codec fallback stays backlog-only.
+- Owner states licensing is verified and requested no further licensing work. Prior independent audit did not resolve exact prebuilt FFmpeg source provenance; this is owner confirmation, not new technical verification. Findings remain in `docs/media-licenses.md`, license texts in `public/licenses/`. Do not reopen the licensing workstream unless asked.
 
-- `get_project_state`
-- `get_activity`
-- `get_transcript`
-- `search_transcript`
-- `inspect_frame`
-- `detect_silences`
+Official starting points: `https://mediabunny.dev/guide/supported-formats-and-codecs`, `/guide/extensions/prores`, `/guide/extensions/ac3`, `/guide/extensions/dts`, `/guide/extensions/aac-encoder`; installed `node_modules/mediabunny/dist/mediabunny.d.ts`.
 
-### Process and edit
+## Verification and backlog
 
-- `rename_project`
-- `transcribe_video`
-- `split_clip` / `trim_clip` / `delete_clip` / `split_text` / `split_background_music`
-- `remove_segments` (batch)
-- `reorder_clips` / `move_clip`
-- `adjust_clip` (color, transform, volume, speed, fades)
-- `set_transition`
-- `set_captions` / `resync_captions` / `add_caption` / `update_caption` / `remove_caption` / `set_caption_style`
-- `add_text_overlay` / `update_text_overlay` / `remove_text_overlay`
-- `request_background_music_upload` / `adjust_background_music` / `remove_background_music`
-- `protect_segment` / `unprotect_segment`
-- `mark_broll` / `remove_broll`
-- `undo` / `redo`
-
-### Output
-
-- `export_mp4`
-- `export_edl`
-- `export_srt`
-
-Register only tools valid for the current project state (uploading, processing, ready, exporting). Tool calls and human controls must invoke the same editing commands.
-
-## Silence removal
-
-Do not infer silence from transcript gaps alone. Use FFmpeg audio silence detection, cross-check candidates against word timestamps, and retain configurable speech padding (initially about 150–250 ms). `detect_silences` returns candidates; the agent or human applies them through `remove_segments`, which ripple-closes the removed spans and retimes timeline text.
-
-## Minimal implementation primitives
-
-- Next.js + TypeScript on Cloudflare Workers; D1 for projects/revisions and R2 for media.
-- Native WebMCP imperative API; no wrapper until required.
-- FFmpeg in Docker locally and an on-demand Cloudflare Container when deployed.
-- Default transcription: Workers AI `@cf/openai/whisper-large-v3-turbo` with word timestamps.
-- Optional BYOK: OpenAI `whisper-1`; keys are forwarded by the app Worker only to OpenAI and are never stored server-side or logged, and users may explicitly remember one in device-local browser storage.
-- FFmpeg creates valid five-minute audio chunks and reports each segment's actual timestamp offset for exact merging after transcription.
-- Native video/canvas APIs for exact-frame inspection.
-
-No speaker diarization. “Render” means FFmpeg video generation, not Render.com.
-
-## Production bar
-
-- Durable autosave and safe concurrent human/agent editing.
-- Validated schemas, permissions, ranges, transition limits, and protected ranges.
-- Explicit processing states, progress, cancellation, retry, and useful errors.
-- Actual preview/final output must match the saved timeline. Preview and export share a canonical 1920×1080 frame; text uses fixed logical coordinates and the bundled DejaVu Sans Bold font so resizing the editor only scales the completed frame and never reflows it.
-- Tests cover command invariants, silence safeguards, undo, stale versions, and export correctness.
-- Accessible, responsive controls that work inside ChatGPT’s in-app browser and WebMCP-enabled Chrome.
-
-## Demo story (<3 minutes)
-
-1. Open a prepared project or upload a video.
-2. Ask an external agent: “Make this energetic, preserve the technical explanation, add subtle fades and captions, and mark B-roll opportunities.”
-3. Agent reads/searches the transcript, protects technical content, and edits through WebMCP.
-4. Timeline and activity feed visibly update.
-5. Human manually adjusts a clip; agent rereads the new version and refines around it.
-6. Play the real preview and export MP4 plus EDL.
-
-## Explicitly out of scope for now
-
-- Built-in LLM, chat, or proprietary agent integration.
-- Multiple source videos, multi-camera, or general-purpose multi-track editing beyond the fixed text, linked source audio, and background-music lanes.
-- Generated/sourced B-roll; markers and briefs are sufficient.
-- Advanced grading, audio mixing, effects, collaboration, or plugin systems.
-
-## Submission requirements
-
-- Working public URL usable from ChatGPT’s in-app browser or WebMCP-enabled Chrome.
-- Public repository with source, setup instructions, assets, and a visible open-source license.
-- Concise write-up explaining WebMCP fit, human-agent cooperation, UX improvement, and implementation.
-- Public YouTube demo under three minutes with audio.
-
-## Current status
-
-The editor, versioned command layer, 40 direct WebMCP tools, D1/R2 persistence, automatic post-upload Workers AI transcription, local and deployed FFmpeg pipelines, authenticated media proxy, exports, tests, public Worker, and public repository are implemented. Sliders preview live; the playhead/ruler supports click-drag scrubbing; fixed S1/V2/V1/A1/A2 lanes expose editable captions, overlays, linked source waveforms, and one real background-music workflow; preview/timeline/lower panes are vertically resizable; and the timeline supports Option/Alt-wheel zoom, drag-edge auto-scroll, explicit gaps, non-ripple trims, linked movement, snapping, X/Y zoom and pan, and keyboard transport/undo. Preview and MP4 export now share a canonical 1920×1080 frame and fixed-coordinate text layout, including the same bundled font, margins, sizing, colours, backgrounds, alignment, and source letterboxing. The landing page keeps a device-local index of opened projects, project renames use the versioned command layer, and MP4 export supports a base-filename dialog plus the native save-location picker where available. WebMCP mutations return compact versioned field diffs instead of complete project snapshots; project state includes only the latest three activity entries, with paginated history available through `get_activity`. Generated captions break at five words, sentence punctuation, long pauses, or three seconds; carry stable source-word anchors; follow structural clip edits without regeneration or duplicate anchors; and can be rebuilt from the saved transcript without retranscription. Component styling is Tailwind-first, global CSS contains only tokens and base behavior, and editor controls have responsive layouts, keyboard focus indicators, accessible names, and reduced-motion behavior. The Cloudflare Container and latest web Worker are deployed; production smoke tests pass for health/FFmpeg, waveform extraction, silence detection, transcription preparation, Workers AI invocation, canonical MP4 rendering, seamless hard cuts, and named downloads. The demo is recorded; final submission checks remain.
+- Predeployment:80Bun tests/369assertions pass (including build-loader regression), typecheck/lint/OpenNext build/diff pass. Seven focused transcription tests/30assertions cover the transcription changes. No live inference/browser checks. Node-only cloud test is skipped in Bun (previous separate Miniflare pass, not rerun this pass). Nine codec policy tests cover native bypass, concurrent/realm loading, failures/retry, cancellation, unsupported/no-audio and output settings.
+- `bun run test:codecs`: bounded real Node/WASM ProRes frame decode; AC3/EAC3/DTS audio decode; AAC encoding+MP4 mux+independent FFmpeg decode all pass. Requires local Node/ffmpeg/ffprobe; fixtures cleaned up. No browser automation or paid calls. Not browser canvas/color parity, full editor export or AAC A/V synchronization proof.
+- Commands: `bun test`, `bun run typecheck`, `bun run lint`, `bun run build`, `git diff --check`. `bun run test:cloud` runs isolated local Node/Miniflare D1/R2 tests; no browser unless explicitly enabled. Browser scripts under `scripts/` require owner authorization.
+- Earlier Chrome/Brave tests covered editing, persistence/recovery, rendered A/V parity, download and cancellation/write-failure injection. A600second synthetic export passed (~79s, browser RSS peak~1634MiB). Not proof of hour-long/4K/mobile/full-disk behavior.
+- Owner manual checks remain: recent resizing/unified-export UI, larger multi-chunk R2 output, real-file codec/playback/export behavior and ChatGPT in-app Download/cookie handoff if still a target. Delayed VideoSample warning fix needs owner confirmation.
+- **Backlog, not current scope:** cloud codec/Container fallback; timeline thumbnail strips; export resolution/quality presets; limited compatible remux/packet-copy optimization. No universal codec-support or release-readiness claims.

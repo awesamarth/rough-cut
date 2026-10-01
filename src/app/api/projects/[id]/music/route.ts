@@ -1,23 +1,12 @@
 import { parseByteRange } from "@/lib/range";
-import { cloudflare, findProject, jsonError } from "@/lib/server";
+import { cloudflare, jsonError } from "@/lib/server";
 
 export const dynamic = "force-dynamic";
-const MAX_SIZE = 100 * 1024 * 1024;
 const assetId = (request: Request) => { const value = new URL(request.url).searchParams.get("asset"); return value && /^[a-f0-9-]{36}$/i.test(value) ? value : null; };
 const key = (id: string, asset: string) => `projects/${id}/music/${asset}`;
 
-export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
-  const { id } = await context.params;
-  if (!await findProject(id)) return jsonError("Project not found", 404);
-  const data = await request.formData().catch(() => null);
-  const file = data?.get("music");
-  if (!(file instanceof File) || !file.type.startsWith("audio/") || file.size <= 0 || file.size > MAX_SIZE) return jsonError("An audio file up to 100 MB is required");
-  const asset = crypto.randomUUID();
-  await cloudflare().MEDIA.put(key(id, asset), await file.arrayBuffer(), {
-    httpMetadata: { contentType: file.type, contentDisposition: `inline; filename*=UTF-8''${encodeURIComponent(file.name)}` },
-    customMetadata: { originalName: file.name, projectId: id },
-  });
-  return Response.json({ id: asset, name: file.name, type: file.type, size: file.size });
+export async function POST() {
+  return jsonError("Cloud music uploads are retired. Download a project backup and import it as a local project to add music. Existing cloud music is unchanged.", 410);
 }
 
 export async function GET(request: Request, context: { params: Promise<{ id: string }> }) {

@@ -1,5 +1,6 @@
 import { validateState, type ProjectState, type TranscriptWord } from "@/lib/editor";
 import { cloudflare, findProject, jsonError, projectResponse } from "@/lib/server";
+import { INSERT_REVISION, UPDATE_PROJECT } from "@/lib/project-sql";
 
 export const dynamic = "force-dynamic";
 
@@ -30,17 +31,18 @@ export async function PUT(request: Request, context: { params: Promise<{ id: str
   const summary = String(input.summary || "Updated project").slice(0, 200);
   const { DB } = cloudflare();
   const stateJson = JSON.stringify(input.state);
-  const update = await DB.prepare(`UPDATE projects SET name = ?, version = ?, state_json = ?, transcript_json = COALESCE(?, transcript_json), updated_at = CURRENT_TIMESTAMP WHERE id = ? AND version = ? RETURNING version`)
-    .bind(input.state.name, input.state.version, stateJson, input.transcript ? JSON.stringify(input.transcript) : null, id, input.expectedVersion)
-    .first<{ version: number }>();
+  // D1 batches are transactional. Record a revision only if this conditional update won.
+  const [update] = await DB.batch([
+    DB.prepare(UPDATE_PROJECT)
+      .bind(input.state.name, input.state.version, stateJson, input.transcript ? JSON.stringify(input.transcript) : null, id, input.expectedVersion),
+    DB.prepare(INSERT_REVISION)
+      .bind(actor, summary, id, input.state.version),
+  ]);
 
-  if (!update) {
+  if (!update.meta.changes) {
     const current = await DB.prepare("SELECT version FROM projects WHERE id = ?").bind(id).first<{ version: number }>();
     return jsonError("Project changed since it was read", 409, { currentVersion: current?.version });
   }
-
-  await DB.prepare("INSERT INTO revisions (project_id, version, state_json, actor, summary) VALUES (?, ?, ?, ?, ?)")
-    .bind(id, input.state.version, stateJson, actor, summary).run();
 
   const project = await findProject(id);
   return Response.json(projectResponse(project!));
