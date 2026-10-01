@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { AUTO_TRANSCRIBE_KEY, queueAutoTranscription } from "@/lib/auto-transcription";
 import { rememberProject } from "@/lib/local-projects";
 import { createLocalProject, importLocalProject } from "@/lib/local-store";
+import { inspectMediaSource } from "@/lib/codec-support";
 
 export function Uploader() {
   const router = useRouter();
@@ -12,6 +13,8 @@ export function Uploader() {
   const backupInput = useRef<HTMLInputElement>(null);
   const choose = useRef<HTMLButtonElement>(null);
   const busy = useRef(false);
+  const opening = useRef<AbortController | null>(null);
+  useEffect(() => () => opening.current?.abort(), []);
   const [working, setWorking] = useState(false);
   const [requested, setRequested] = useState(false);
   const [error, setError] = useState("");
@@ -40,26 +43,27 @@ export function Uploader() {
 
   async function open(file: File, backup = false) {
     if (busy.current) return;
+    const controller = new AbortController();
+    opening.current = controller;
     busy.current = true; setWorking(true); setError(""); setRequested(false);
     try {
       let id: string;
       if (backup) {
         if (file.size > 32 * 1024 * 1024) throw new Error("Project backup is too large (maximum 32 MB)");
-        id = await importLocalProject(JSON.parse(await file.text()));
+        const text = await file.text();
+        controller.signal.throwIfAborted();
+        id = await importLocalProject(JSON.parse(text));
       } else {
-        const { ALL_FORMATS, BlobSource, Input } = await import("mediabunny");
-        const media = new Input({ source: new BlobSource(file), formats: ALL_FORMATS });
-        try {
-          const video = await media.getPrimaryVideoTrack();
-          if (!video) throw new Error("Choose a file containing a video track");
-          id = await createLocalProject(file, await video.computeDuration() * 1000);
-        } finally { media.dispose(); }
+        const { durationMs } = await inspectMediaSource(file, "source", controller.signal);
+        controller.signal.throwIfAborted();
+        id = await createLocalProject(file, durationMs);
       }
+      controller.signal.throwIfAborted();
       if (!backup && autoTranscribe) queueAutoTranscription(id);
       rememberProject(id);
       router.push(`/editor/${id}`);
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not open file"); }
-    finally { busy.current = false; setWorking(false); }
+    } catch (cause) { if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : "Could not open file"); }
+    finally { busy.current = false; if (!controller.signal.aborted) setWorking(false); }
   }
 
   return <><div className={`mt-10 flex min-h-[230px] flex-col items-center justify-center rounded-2xl border border-dashed p-8 text-center ${dragging ? "border-[var(--lime)] bg-[#1b2114]" : "border-[#3a404a] bg-[#121419cc]"}`}

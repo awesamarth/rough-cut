@@ -13,8 +13,20 @@ Unmodified source:
 https://github.com/cutterbl/SoundTouchJS/tree/v2.1.1/packages/core
 https://github.com/cutterbl/SoundTouchJS/tree/v2.1.1/packages/interpolation-strategy-lanczos
 
-MPL 2.0 license text: https://www.mozilla.org/en-US/MPL/2.0/
+MPL 2.0 license text: /licenses/MPL-2.0.txt (https://www.mozilla.org/en-US/MPL/2.0/)
 These libraries retain their licenses; ROUGH//CUT's own code is MIT-licensed.
+
+Optional local codec extensions (loaded only when the actual track/output capability requires them), all version 1.55.7:
+- @mediabunny/prores (MPL-2.0), based on the bundled TurboRes WASM decoder (TurboRes MPL-2.0, version 1.2.2):
+  https://github.com/Vanilagy/mediabunny/tree/v1.55.7/packages/prores
+  https://github.com/Vanilagy/turbores/tree/v1.2.2
+- @mediabunny/ac3 (MPL-2.0), @mediabunny/dts (MPL-2.0), and @mediabunny/aac-encoder (MPL-2.0) bundle size-optimized FFmpeg WASM codec builds. Their package READMEs document the selected codec build and FFmpeg source/build path:
+  https://github.com/Vanilagy/mediabunny/tree/v1.55.7/packages/ac3
+  https://github.com/Vanilagy/mediabunny/tree/v1.55.7/packages/dts
+  https://github.com/Vanilagy/mediabunny/tree/v1.55.7/packages/aac-encoder
+  https://github.com/FFmpeg/FFmpeg
+  https://ffmpeg.org/legal.html
+FFmpeg's default license is LGPL-2.1-or-later (text: /licenses/LGPL-2.1.txt); optional GPL components change its license. The wrapper's MPL license does not relicense it. The published recipes omit GPL/nonfree flags, but this does not establish the shipped binary's exact build provenance. The package READMEs provide build recipes but do not pin the FFmpeg source revision used for their prebuilt WASM. Exact corresponding source/build provenance and required redistribution materials remain a release gate before public distribution; no particular FFmpeg revision or completed license compliance is claimed here.
 
 Inter (caption font, bundled variable TTF; semibold weight 600)
 Copyright 2020 The Inter Project Authors (https://github.com/rsms/inter)

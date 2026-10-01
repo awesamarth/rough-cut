@@ -43,6 +43,7 @@ next-env.d.ts
 # local media jobs and submission draft
 .media-data/
 CHALLENGE.md
+/reddit-post.md
 
 # OpenNext
 .open-next

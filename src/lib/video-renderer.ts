@@ -1,6 +1,7 @@
 import { ALL_FORMATS, BlobSource, CanvasSink, Input, UrlSource } from "mediabunny";
 import { FRAME_HEIGHT, FRAME_WIDTH, framePlan, TEXT_COLORS } from "./composition";
 import type { ProjectState } from "./editor";
+import { ensureTrackDecodable } from "./codec-support";
 
 export type MediaSource = Blob | string;
 type Context = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
@@ -95,6 +96,8 @@ export class VideoRenderer {
   private disposed = false;
   private pending: Promise<void> = Promise.resolve();
   private disposal?: Promise<void>;
+  private trackSupport?: Promise<void>;
+  private supportController = new AbortController();
   constructor(source: MediaSource) {
     this.input = new Input({ source: typeof source === "string" ? new UrlSource(source) : new BlobSource(source), formats: ALL_FORMATS });
     this.track = this.input.getPrimaryVideoTrack();
@@ -121,7 +124,9 @@ export class VideoRenderer {
         let reader = this.readers.get(clip.id);
         if (!reader) {
           const track = await this.track;
-          if (!track || !await track.canDecode()) throw new Error("This browser cannot decode the source video codec");
+          if (!track) throw new Error("The source has no video track");
+          this.trackSupport ??= ensureTrackDecodable(track, "video", this.supportController.signal).then(() => undefined);
+          await this.trackSupport;
           reader = new FrameReader(new CanvasSink(track, { width: FRAME_WIDTH, height: FRAME_HEIGHT, fit: "contain", poolSize: 3 }));
           this.readers.set(clip.id, reader);
         }
@@ -142,6 +147,7 @@ export class VideoRenderer {
   dispose() {
     if (this.disposal) return this.disposal;
     this.disposed = true;
+    this.supportController?.abort(new DOMException("Renderer closed", "AbortError"));
     return this.disposal = (async () => {
       // Finish any in-flight draw before returning the iterators and their prefetched samples.
       await this.pending.catch(() => {});

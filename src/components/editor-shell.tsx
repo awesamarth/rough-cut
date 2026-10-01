@@ -17,6 +17,7 @@ import { boundHistory, getLocalProject, type MediaDescription } from "@/lib/loca
 import { cancelCloudOutput, cloudOutputUrl, requestCloudOutput, type CloudOutputSession } from "@/lib/cloud-output-client";
 import { exportByteEstimate, runExportWorker, localExport, mp4Filename, removeTemporaryExport, type ReadyExport } from "@/lib/local-export";
 import { estimateExportStorage, shouldOfferCloudRetry } from "@/lib/export-destination";
+import { ensureOutputEncoding, inspectInput } from "@/lib/codec-support";
 import type { MediaSource } from "@/lib/video-renderer";
 import { ExportLibrary } from "./export-library";
 import { useEditor, type CommandInput } from "./use-editor";
@@ -130,23 +131,22 @@ export function Editor({ projectId }: { projectId: string }) {
   }, [state, textPreview, musicPreview, captionOpacity]);
   const player = useTimelinePlayer(preview, media.source, media.music, setError);
   const { seekTimeline, togglePlayback, playheadMs, isPlaying } = player;
-  const transcription = useTranscription(projectId, media.source, editor.stateRef, editor.saveTranscript, durability, !!state, setError);
+  const transcription = useTranscription(projectId, media.source, editor.stateRef, editor.transcriptRef, editor.saveTranscript, durability, !!state, setError);
   const total = state ? timelineDuration(state) : 0;
   const initialize = editor.initialize;
   useEffect(() => {
     if (!project || state || !media.source) return;
     const source = media.source;
     let canceled = false;
+    const controller = new AbortController();
     let input: import("mediabunny").Input | undefined;
     void import("mediabunny").then(async ({ Input, BlobSource, UrlSource, ALL_FORMATS }) => {
       if (canceled) return;
       input = new Input({ source: typeof source === "string" ? new UrlSource(source) : new BlobSource(source), formats: ALL_FORMATS });
-      const track = await input.getPrimaryVideoTrack();
-      if (!track) throw new Error("The legacy source has no video track");
-      const duration = await track.computeDuration() * 1000;
+      const { durationMs: duration } = await inspectInput(input, "source", controller.signal);
       if (!canceled) initialize(duration);
     }).catch((cause) => { if (!canceled) setError(String(cause)); }).finally(() => input?.dispose());
-    return () => { canceled = true; input?.dispose(); };
+    return () => { canceled = true; controller.abort(new DOMException("Editor closed", "AbortError")); input?.dispose(); };
   }, [project, state, media.source, initialize, setError]);
 
   useEffect(() => {
@@ -202,6 +202,10 @@ export function Editor({ projectId }: { projectId: string }) {
     assertExportSnapshot(snapshot);
     let session: CloudOutputSession | undefined;
     try {
+      // Reserve cloud output only after checking the canonical local encoders.
+      await ensureOutputEncoding(controller.signal);
+      controller.signal.throwIfAborted();
+      assertExportSnapshot(snapshot);
       session = await requestCloudOutput(filename, exportByteEstimate(snapshot), controller.signal);
       await runExportWorker(snapshot, source, music, { cloud: session }, controller.signal, (progress) => { if (exportMounted.current) setExportProgress(progress); });
       controller.signal.throwIfAborted();
@@ -337,7 +341,7 @@ export function Editor({ projectId }: { projectId: string }) {
       {exportProgress !== null && <button className={button} onClick={() => exportController.current?.abort(new DOMException("Export canceled", "AbortError"))}>Cancel export</button>}
     </header>
     {editor.error && <div role="alert" className="flex flex-wrap items-center gap-3 bg-[#401c17] px-4 py-2 text-xs text-[#ff9781]"><span className="mr-auto">{editor.error}</span>{editor.saveFailed && <>{editor.recoveryRaw !== null ? <button className="underline" onClick={() => downloadText(`${state.name}-raw-recovery.txt`, editor.recoveryRaw!)}>Download raw recovery</button> : <button className="underline" onClick={() => void backupProject(true).catch((error) => setError(String(error)))}>Back up pending edits</button>}<button className="underline" onClick={editor.discardRecovery}>Discard pending / reload saved</button></>}<button aria-label="Dismiss error" onClick={() => setError("")}>×</button></div>}
-    {media.missing.length > 0 && <div className="flex flex-wrap gap-4 bg-[#202716] p-3 text-xs">{media.missing.map(({ id, description }) => <label key={id}>Relink {description.name}<input className="ml-5 max-w-full cursor-pointer text-[var(--muted)] file:mr-3 file:cursor-pointer file:rounded-md file:border-0 file:bg-[var(--lime)] file:px-3 file:py-2 file:text-xs file:font-bold file:text-[#10120d] hover:file:bg-[#e5ff93] focus-visible:rounded-md focus-visible:outline-2 focus-visible:outline-[var(--lime)]" type="file" accept={id === "source" ? "video/*" : "audio/*"} onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) { try { media.relink(id, file); setError(""); } catch (error) { setError(String(error)); } } }} /></label>)}</div>}
+    {media.missing.length > 0 && <div className="flex flex-wrap gap-4 bg-[#202716] p-3 text-xs">{media.missing.map(({ id, description }) => <label key={id}>Relink {description.name}<input className="ml-5 max-w-full cursor-pointer text-[var(--muted)] file:mr-3 file:cursor-pointer file:rounded-md file:border-0 file:bg-[var(--lime)] file:px-3 file:py-2 file:text-xs file:font-bold file:text-[#10120d] hover:file:bg-[#e5ff93] focus-visible:rounded-md focus-visible:outline-2 focus-visible:outline-[var(--lime)]" type="file" accept={id === "source" ? "video/*" : "audio/*"} onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void media.relink(id, file).then(() => setError("")).catch((error) => { if (!(error instanceof DOMException && error.name === "AbortError")) setError(String(error)); }); }} /></label>)}</div>}
     {confirmation}{editor.confirmation}{transcription.confirmation}
     {exportDialog && <Modal title="Export MP4" onClose={() => setExportDialog(false)}><form onSubmit={(event) => { event.preventDefault(); void startExport(); }}>
       <p className="mt-0 mb-5 text-sm leading-relaxed text-[var(--muted)]">Choose a file name. The video is rendered on this device. It will save directly where supported, otherwise use browser storage when space is available. Temporary cloud storage is offered only with your consent when local space is insufficient.</p>
@@ -368,7 +372,7 @@ export function Editor({ projectId }: { projectId: string }) {
       <Timeline state={state} waveform={waveform} musicWaveform={musicWaveform} musicPreview={musicPreview} snapping={snapping} bladeMode={bladeMode} playheadMs={playheadMs} selectedClipId={selectedClipId} selectedMusicId={selectedMusicId} selectedText={selectedText} onSelect={selectClip} onEditText={selectText} onEditMusic={selectMusic} onClearSelection={clearSelection} onSeek={seekTimeline} dispatch={dispatch} setError={setError} />
     </section>
     <section className="relative flex shrink-0 flex-col bg-[var(--panel)]" style={{ height: lowerHeight }}>{splitter("bottom")}<div role="tablist" aria-label="Editor panels" className="flex flex-wrap gap-2 border-b border-[var(--line)] p-2">{(["transcript", "text", "music", "silence", "markers", "activity", "exports"] as const).map((name) => <button key={name} role="tab" aria-selected={tab === name} className={`px-2 text-xs uppercase ${tab === name ? "text-[var(--lime)]" : "text-[var(--muted)]"}`} onClick={() => setTab(name)}>{name}</button>)}</div><div role="tabpanel" className="min-h-0 flex-1 overflow-auto">
-      {tab === "transcript" && <TranscriptPanel state={state} transcript={transcript} playheadMs={playheadMs} dispatch={dispatch} transcribeVideo={transcription.run} automaticStatus={transcription.status} cancelTranscription={transcription.cancel} seekTimeline={seekTimeline} setError={setError} />}
+      {tab === "transcript" && <TranscriptPanel state={state} transcript={transcript} playheadMs={playheadMs} dispatch={dispatch} transcribeVideo={transcription.run} automaticStatus={transcription.status} transcriptionNotice={transcription.notice} cancelTranscription={transcription.cancel} seekTimeline={seekTimeline} setError={setError} />}
       {tab === "text" && <TextPanel state={state} playheadMs={playheadMs} dispatch={dispatch} />}{tab === "music" && <MusicPanel projectId={projectId} local={!!project.local} state={state} requested={requestedMusic} onRequestComplete={() => setRequestedMusic(false)} dispatch={dispatch} setError={setError} />}{tab === "silence" && <SilencePanel transcript={transcript} detect={detectSilences} dispatch={dispatch} setError={setError} />}{tab === "activity" && <ActivityPanel state={state} />}
       {tab === "exports" && <ExportLibrary onRemoved={(name) => { if (ready?.temporaryName === name) setReady(null); }} />}
       {tab === "markers" && <div className="space-y-2 p-3 text-xs">{[...state.protectedRanges.map((item) => ({ ...item, protected: true })), ...state.broll.map((item) => ({ ...item, protected: false }))].map((item) => <div key={item.id} className="flex items-center gap-3 border-b border-[var(--line)] py-2"><span className="font-bold">{item.protected ? "Protected" : "B-roll"}</span><span className="flex-1">{item.label} · source {timecode(item.startMs)}–{timecode(item.endMs)}</span><button className={button} onClick={() => human(item.protected ? { type: "unprotect_segment", actor: "human", rangeId: item.id } : { type: "remove_broll", actor: "human", id: item.id })}>Remove</button></div>)}{!state.protectedRanges.length && !state.broll.length && <p>Select transcript words or a video clip to protect a source range or add a B-roll brief.</p>}</div>}

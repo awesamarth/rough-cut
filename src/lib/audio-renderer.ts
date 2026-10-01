@@ -3,6 +3,7 @@ import { Stretch } from "@soundtouchjs/core";
 import { ALL_FORMATS, BlobSource, Conversion, Input, NullTarget, Output, UrlSource, WavOutputFormat } from "mediabunny";
 import { AUDIO_RATE, clipEnvelope, musicGain } from "./composition";
 import { clipDuration, musicClipEnd, timelineClips, type ProjectState } from "./editor";
+import { ensureTrackDecodable } from "./codec-support";
 import type { MediaSource } from "./video-renderer";
 
 async function* decodedPcm(source: MediaSource, startMs: number, endMs: number, signal: AbortSignal) {
@@ -17,7 +18,7 @@ async function* decodedPcm(source: MediaSource, startMs: number, endMs: number, 
     signal.throwIfAborted();
     const track = await input.getPrimaryAudioTrack();
     if (!track) { await writer.close(); return; }
-    if (!await track.canDecode()) throw new Error("This browser cannot decode the source audio codec");
+    await ensureTrackDecodable(track, "audio", signal);
     let cursor = 0;
     conversion = await Conversion.init({
       input, output: new Output({ format: new WavOutputFormat(), target: new NullTarget() }),

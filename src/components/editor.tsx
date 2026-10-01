@@ -14,6 +14,7 @@ import { analyzeAudio, prepareAudioChunk } from "@/lib/browser-audio";
 import { silenceCandidates, waveformPeaks, type AudioAnalysis } from "@/lib/audio-analysis";
 import { useMediaAssets } from "./use-media-assets";
 import { addLocalMusic, getLocalProject } from "@/lib/local-store";
+import { inspectMediaSource } from "@/lib/codec-support";
 
 const MEDIA_URL = "/api/media";
 type SaveFileHandle = { createWritable(): Promise<WritableStream<Uint8Array>> };
@@ -626,7 +627,7 @@ export function Editor({ projectId }: { projectId: string }) {
         </div>
       </header>
 
-      {media.missing.length > 0 && !error && <div className="row-start-2 flex flex-wrap items-center gap-3 border-b border-[var(--line)] bg-[#202716] px-4 py-2 text-xs"><span>Select original media to resume preview/export. Edits are saved locally.</span>{media.missing.map(({ id, description }) => <label key={id} className="flex items-center gap-2">{description.name}<input className="max-w-48 text-xs" type="file" accept={id === "source" ? "video/*" : "audio/*"} onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) { try { media.relink(id, file); } catch (cause) { setError(String(cause)); } } }} /></label>)}</div>}
+      {media.missing.length > 0 && !error && <div className="row-start-2 flex flex-wrap items-center gap-3 border-b border-[var(--line)] bg-[#202716] px-4 py-2 text-xs"><span>Select original media to resume preview/export. Edits are saved locally.</span>{media.missing.map(({ id, description }) => <label key={id} className="flex items-center gap-2">{description.name}<input className="max-w-48 text-xs" type="file" accept={id === "source" ? "video/*" : "audio/*"} onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) { void media.relink(id, file).then(() => setError("")).catch((cause) => { if (!(cause instanceof DOMException && cause.name === "AbortError")) setError(String(cause)); }); } }} /></label>)}</div>}
       {error && <div className="row-start-2 flex justify-between border-b border-[#7c3024] bg-[#401c17] px-[18px] py-2 text-xs text-[#ff9781]" role="alert"><span>{error}{editor.saveFailed && <span className="ml-3 inline-flex gap-3"><button className="cursor-pointer underline" onClick={() => downloadText(`${state?.name ?? "project"}-recovery.json`, JSON.stringify({ state: editor.stateRef.current, transcript: editor.transcriptRef.current }, null, 2), "application/json")}>Back up pending edits</button><button className="cursor-pointer underline" onClick={editor.discardRecovery}>Reload saved version</button></span>}</span><button className="cursor-pointer border-0 bg-transparent" aria-label="Dismiss error" onClick={() => setError("")}>×</button></div>}
 
       <section className="row-start-3 grid min-h-0 grid-cols-[minmax(0,1fr)_280px] max-[900px]:grid-cols-1">
@@ -1148,7 +1149,7 @@ export function Timeline({ state, waveform, musicWaveform, musicPreview, snappin
   </div></div></div>;
 }
 
-export function TranscriptPanel({ state, transcript, playheadMs, dispatch, transcribeVideo, automaticStatus, cancelTranscription, seekTimeline, setError }: { state: ProjectState; transcript: TranscriptWord[]; playheadMs: number; dispatch(command: CommandInput): ProjectState; transcribeVideo(actor?: "human" | "agent", provider?: "cloudflare" | "openai", apiKey?: string, onProgress?: (message: string) => void): Promise<ProjectState>; automaticStatus: string; cancelTranscription(): void; seekTimeline(ms: number): void; setError(message: string): void }) {
+export function TranscriptPanel({ state, transcript, playheadMs, dispatch, transcribeVideo, automaticStatus, transcriptionNotice, cancelTranscription, seekTimeline, setError }: { state: ProjectState; transcript: TranscriptWord[]; playheadMs: number; dispatch(command: CommandInput): ProjectState; transcribeVideo(actor?: "human" | "agent", provider?: "cloudflare" | "openai", apiKey?: string, onProgress?: (message: string) => void): Promise<ProjectState>; automaticStatus: string; transcriptionNotice?: string; cancelTranscription(): void; seekTimeline(ms: number): void; setError(message: string): void }) {
   const { prompt, confirmation } = useConfirmation();
   const [query, setQuery] = useState("");
   const [selection, setSelection] = useState<[number, number] | null>(null);
@@ -1167,10 +1168,12 @@ export function TranscriptPanel({ state, transcript, playheadMs, dispatch, trans
   async function transcribe() {
     setError("");
     try { await transcribeVideo("human", provider, apiKey, setProcessing); setProcessing(""); }
-    catch (cause) { setProcessing(""); setError(cause instanceof Error ? cause.message : "Transcription failed"); }
+    catch (cause) { setProcessing(""); if (!(cause instanceof DOMException && cause.name === "AbortError")) setError(cause instanceof Error ? cause.message : "Transcription failed"); }
   }
 
-  const selectedRange = selection && transcript.length ? { startMs: transcript[Math.min(...selection)].startMs, endMs: transcript[Math.max(...selection)].endMs } : null;
+  const firstSelected = selection ? transcript[Math.min(...selection)] : undefined;
+  const lastSelected = selection ? transcript[Math.max(...selection)] : undefined;
+  const selectedRange = firstSelected && lastSelected ? { startMs: firstSelected.startMs, endMs: lastSelected.endMs } : null;
   function generateCaptions() {
     dispatch({ type: "set_captions", actor: "human", items: captionsFromTranscript(state, transcript) });
   }
@@ -1178,18 +1181,20 @@ export function TranscriptPanel({ state, transcript, playheadMs, dispatch, trans
   return <div>{confirmation}
     <div className="sticky top-0 z-2 flex min-h-12 items-center gap-1.75 overflow-x-auto border-b border-[var(--line)] bg-[#13161bef] px-3 py-1.75 max-[900px]:flex-wrap">
       <input className="min-w-[180px] rounded-md border border-[var(--line)] bg-[#0b0d10] px-2.25 py-1.75 text-[11px] text-white" aria-label="Search transcript" placeholder="Search transcript" value={query} onChange={(event) => setQuery(event.target.value)} />
-      {transcript.length ? <>
+      {transcript.length > 0 && <>
         <button className="cursor-pointer whitespace-nowrap rounded-md border border-[#333944] bg-[#20242b] px-2.5 py-1.75 text-[10px]" disabled={!selectedRange} onClick={() => selectedRange && dispatch({ type: "protect_segment", actor: "human", ...selectedRange, label: "Protected by human" })}>Protect selection</button>
         <button className="cursor-pointer rounded-md border border-[#333944] bg-[#20242b] px-2.5 py-1.75 text-[10px]" disabled={!selectedRange} onClick={() => selectedRange && void requestBroll(selectedRange, dispatch, prompt).catch((error) => setError(String(error)))}>Mark B-roll</button>
         <button className="cursor-pointer whitespace-nowrap rounded-md border border-[#333944] bg-[#20242b] px-2.5 py-1.75 text-[10px]" disabled={!selectedRange} onClick={() => selectedRange && dispatch({ type: "remove_segments", actor: "human", ranges: [selectedRange] })}>Cut selection</button>
         <button className="cursor-pointer whitespace-nowrap rounded-md border border-[#333944] bg-[#20242b] px-2.5 py-1.75 text-[10px]" onClick={generateCaptions}>{state.captions.length ? "Resync captions" : "Generate captions"}</button>
-      </> : <>
+      </>}
+      <>
         <select className="w-auto rounded-[5px] border border-[var(--line)] bg-[#0e1014] p-1.75 text-[11px]" aria-label="Transcription provider" value={provider} onChange={(event) => setProvider(event.target.value as typeof provider)}><option value="cloudflare">Cloudflare Whisper Large v3</option><option value="openai">OpenAI whisper-1 (your key)</option></select>
         {provider === "openai" && <><input className="min-w-[180px] rounded-md border border-[var(--line)] bg-[#0b0d10] px-2.25 py-1.75 text-[11px] text-white" aria-label="OpenAI API key" type="password" autoComplete="off" placeholder="OpenAI API key" value={apiKey} onChange={(event) => { const value = event.target.value; setApiKey(value); if (rememberApiKey) { if (value) localStorage.setItem("rough-cut.openai-api-key", value); else localStorage.removeItem("rough-cut.openai-api-key"); } }} /><label className="flex items-center gap-1.5 whitespace-nowrap text-[10px] text-[var(--muted)]"><input type="checkbox" checked={rememberApiKey} onChange={(event) => { setRememberApiKey(event.target.checked); if (event.target.checked && apiKey) localStorage.setItem("rough-cut.openai-api-key", apiKey); else localStorage.removeItem("rough-cut.openai-api-key"); }} />Remember on this device</label></>}
-        <button className="cursor-pointer whitespace-nowrap rounded-[7px] border-0 bg-[var(--lime)] px-[13px] py-2 text-xs font-extrabold text-[#10120d] hover:bg-[#e5ff93]" disabled={!!processing || !!automaticStatus || provider === "openai" && !apiKey} onClick={() => void transcribe()} aria-live="polite">{automaticStatus || processing || "Transcribe video"}</button>
-      </>}
+        <button className="cursor-pointer whitespace-nowrap rounded-[7px] border-0 bg-[var(--lime)] px-[13px] py-2 text-xs font-extrabold text-[#10120d] hover:bg-[#e5ff93]" disabled={!!processing || !!automaticStatus || provider === "openai" && !apiKey} onClick={() => void transcribe()} aria-live="polite">{automaticStatus || processing || (transcript.length ? "Continue / transcribe" : "Transcribe video")}</button>
+      </>
       {automaticStatus && <button className="cursor-pointer rounded border border-[var(--line)] px-2 py-1 text-xs" onClick={cancelTranscription}>Cancel transcription</button>}
     </div>
+    {transcriptionNotice && <p role="status" className="m-0 border-b border-[var(--line)] px-3 py-2 text-xs text-[var(--muted)]">{transcriptionNotice}</p>}
     {transcript.length ? <div className="p-3.5 leading-[2.05]">{visible.map(({ word, index }) => {
       const selected = selection && index >= Math.min(...selection) && index <= Math.max(...selection);
       const current = sourcePlayhead !== undefined && word.startMs <= sourcePlayhead && sourcePlayhead < word.endMs;
@@ -1213,29 +1218,42 @@ export function TextPanel({ state, playheadMs, dispatch }: { state: ProjectState
 
 export function MusicPanel({ projectId, local, state, requested, onRequestComplete, dispatch, setError }: { projectId: string; local: boolean; state: ProjectState; requested: boolean; onRequestComplete(): void; dispatch(command: CommandInput): ProjectState; setError(message: string): void }) {
   const [uploading, setUploading] = useState(false);
+  const pendingUpload = useRef<AbortController | null>(null);
+  useEffect(() => {
+    setUploading(false);
+    return () => { pendingUpload.current?.abort(); pendingUpload.current = null; };
+  }, [projectId, state.music.length]);
   const chooserRef = useRef<HTMLLabelElement>(null);
   useEffect(() => {
     if (!requested || state.music.length) return;
     requestAnimationFrame(() => { chooserRef.current?.scrollIntoView({ behavior: "smooth", block: "center" }); chooserRef.current?.focus({ preventScroll: true }); });
   }, [requested, state.music.length]);
   const upload = async (file?: File) => {
-    if (!file) return;
+    if (!file || pendingUpload.current) return;
+    const controller = new AbortController();
+    pendingUpload.current = controller;
     setUploading(true); setError("");
-    const url = URL.createObjectURL(file);
     try {
-      const durationMs = await new Promise<number>((resolve, reject) => { const audio = new Audio(url); audio.onloadedmetadata = () => resolve(Math.round(audio.duration * 1000)); audio.onerror = () => reject(new Error("Could not read audio duration")); });
+      // Inspect the actual track/configuration before any local or legacy-cloud
+      // asset is stored. Failed validation leaves the current project unchanged.
+      const { durationMs } = await inspectMediaSource(file, "audio", controller.signal);
+      controller.signal.throwIfAborted();
       let assetId: string;
       if (local) assetId = await addLocalMusic(projectId, file);
       else {
         const form = new FormData(); form.set("music", file);
-        const response = await fetch(`/api/projects/${projectId}/music`, { method: "POST", body: form });
+        const response = await fetch(`/api/projects/${projectId}/music`, { method: "POST", body: form, signal: controller.signal });
         const result = await response.json() as { id?: string; error?: string };
         if (!response.ok || !result.id) throw new Error(result.error || "Music upload failed");
         assetId = result.id;
       }
+      controller.signal.throwIfAborted();
       dispatch({ type: "set_music", actor: "human", music: { assetId, name: file.name, durationMs, timelineStartMs: 0, sourceInMs: 0, sourceOutMs: durationMs, speed: 1, volume: 0.3, muted: false, fadeInMs: 500, fadeOutMs: 500, loop: durationMs < timelineDuration(state) } });
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "Music upload failed"); }
-    finally { URL.revokeObjectURL(url); setUploading(false); }
+    } catch (cause) { if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : "Music upload failed"); }
+    finally {
+      if (pendingUpload.current === controller) pendingUpload.current = null;
+      if (!controller.signal.aborted) setUploading(false);
+    }
   };
   if (state.music.length) return <p className="m-0 p-8 text-center text-xs text-[var(--muted)]">Music is imported. Select an A2 clip on the timeline to adjust it in the Inspector.</p>;
   return <div className="grid place-items-center gap-3 p-8 text-center"><p className="m-0 text-xs text-[var(--muted)]">Import one background-music file to the A2 track.</p><label ref={chooserRef} tabIndex={-1} className={`cursor-pointer rounded-[7px] bg-[var(--lime)] px-4 py-2 text-xs font-extrabold text-[#10120d] outline-none ${requested ? "animate-pulse ring-2 ring-white ring-offset-2 ring-offset-[#13161b] motion-reduce:animate-none" : ""}`}>{uploading ? "Uploading…" : "Choose music"}<input className="hidden" type="file" accept="audio/*" disabled={uploading} onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ""; if (file) { onRequestComplete(); void upload(file); } }} /></label></div>;

@@ -2,6 +2,7 @@ import { normalizePcmTimestamp } from "./media-timing";
 import { ALL_FORMATS, AudioSampleSink, BlobSource, NullTarget, Conversion, Input, Output, UrlSource, WavOutputFormat } from "mediabunny";
 import { accumulatePeaks, ANALYSIS_WINDOW_MS, type AudioAnalysis } from "./audio-analysis";
 import { transcriptionWav, writeTranscriptionPcm } from "./pcm-wav";
+import { ensureTrackDecodable } from "./codec-support";
 
 type Request = { source: string | Blob; chunk?: { startMs: number; endMs: number } };
 const scope = self as unknown as { onmessage: ((event: MessageEvent<Request>) => void) | null; postMessage(message: unknown, transfer?: Transferable[]): void };
@@ -13,7 +14,8 @@ scope.onmessage = async ({ data }) => {
       const { startMs, endMs } = data.chunk;
       if (![startMs, endMs].every(Number.isFinite) || startMs < 0 || endMs <= startMs || endMs - startMs > 300_000) throw new Error("Invalid audio chunk range");
       const track = await input.getPrimaryAudioTrack();
-      if (!track || !await track.canDecode()) throw new Error("Source audio cannot be decoded in this browser");
+      if (!track) throw new Error("The source has no audio track; transcription audio cannot be prepared.");
+      await ensureTrackDecodable(track, "audio");
       const buffer = transcriptionWav(endMs - startMs);
       const output = new Output({ format: new WavOutputFormat(), target: new NullTarget() });
       let samples = 0;
@@ -41,7 +43,7 @@ scope.onmessage = async ({ data }) => {
     const track = await input.getPrimaryAudioTrack();
     const peaks = new Float32Array(track ? Math.ceil(durationMs / ANALYSIS_WINDOW_MS) : 0).fill(-1);
     if (track) {
-      if (!await track.canDecode()) throw new Error("This browser cannot decode this audio codec. No cloud processing was started.");
+      await ensureTrackDecodable(track, "audio");
       const sink = new AudioSampleSink(track);
       for await (const sample of sink.samples()) {
         try {

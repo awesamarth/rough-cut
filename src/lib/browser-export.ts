@@ -1,4 +1,4 @@
-import { AudioSample, AudioSampleSource, CanvasSource, Mp4OutputFormat, Output, StreamTarget, canEncodeAudio, canEncodeVideo, type StreamTargetChunk } from "mediabunny";
+import { AudioSample, AudioSampleSource, CanvasSource, Mp4OutputFormat, Output, StreamTarget, type StreamTargetChunk } from "mediabunny";
 import type { OutputWriter } from "./cloud-output-writer";
 import { AudioRenderer } from "./audio-renderer";
 import { AUDIO_RATE, FRAME_HEIGHT, FRAME_RATE, FRAME_WIDTH } from "./composition";
@@ -6,10 +6,11 @@ import { timelineDuration, validateState, type ProjectState } from "./editor";
 import { measureAacDelay } from "./aac-timing";
 import { fixMp4Timing } from "./mp4-timing";
 import { VideoRenderer, type MediaSource } from "./video-renderer";
+import { ensureOutputEncoding } from "./codec-support";
 
 export async function exportTimeline(state: ProjectState, source: MediaSource, music: Record<string, MediaSource>, handle: { createWritable(): Promise<OutputWriter> }, signal: AbortSignal, progress: (fraction: number) => void) {
   validateState(state); signal.throwIfAborted();
-  if (!await canEncodeVideo("avc", { width: FRAME_WIDTH, height: FRAME_HEIGHT, bitrate: 8_000_000 }) || !await canEncodeAudio("aac", { numberOfChannels: 2, sampleRate: AUDIO_RATE, bitrate: 192_000 })) throw new Error("Required H.264/AAC encoding is not supported on this device. No cloud rendering was started.");
+  await ensureOutputEncoding(signal);
   const timing = await measureAacDelay(signal);
   signal.throwIfAborted();
   const writable = await handle.createWritable();
