@@ -17,6 +17,14 @@ test("timeline selection stays linked and tiny text boxes have no padding/border
   />);
   for (const bladeMode of [false, true]) {
     const html = render(true, bladeMode);
+    const rulerStart = html.indexOf("data-timeline-ruler");
+    const trackStart = html.indexOf('class="timeline-track');
+    expect(rulerStart).toBeGreaterThan(-1);
+    expect(html.slice(rulerStart, trackStart)).toContain("sticky top-0 z-[10]");
+    expect(html.slice(rulerStart, trackStart)).toContain("bg-[#0e1014]");
+    expect(html.slice(rulerStart, trackStart)).toContain('aria-label="Scrub timeline"');
+    expect(html.slice(rulerStart, trackStart)).toContain('aria-label="Drag playhead"');
+    expect(html.slice(trackStart)).not.toContain('aria-label="Drag playhead"');
     expect(html.match(/after:bg-white\/5/g)).toHaveLength(2);
     expect(html.match(/after:border-\[var\(--lime\)\]/g)).toHaveLength(2);
     expect(render(false, bladeMode)).not.toContain("after:bg-white/5");
