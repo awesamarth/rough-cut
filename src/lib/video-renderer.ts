@@ -2,6 +2,7 @@ import { ALL_FORMATS, BlobSource, CanvasSink, Input, UrlSource } from "mediabunn
 import { FRAME_HEIGHT, FRAME_WIDTH, framePlan, TEXT_COLORS } from "./composition";
 import type { ProjectState } from "./editor";
 import { ensureTrackDecodable } from "./codec-support";
+import { textBoxPosition } from "./text-position";
 
 export type MediaSource = Blob | string;
 type Context = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
@@ -62,7 +63,7 @@ function wrapText(context: Context, text: string, width: number) {
 
 export function drawText(context: Context, state: ProjectState, timeMs: number) {
   const captions = state.captions.map((item) => ({ ...item, fontSize: { small: 38, medium: 48, large: 58 }[state.captionStyle.size], color: state.captionStyle.color, background: state.captionStyle.background, opacity: state.captionStyle.backgroundOpacity, padding: 8, font: "RoughCutCaptions", weight: 600, shadow: "#0006" }));
-  const overlays = state.overlays.map((item) => ({ ...item, fontSize: item.fontSize ?? 54, color: item.color ?? "white", background: item.background !== false, opacity: 0.47, padding: 10, font: "RoughCutText", weight: 700, shadow: "#000" }));
+  const overlays = state.overlays.map((item) => ({ ...item, fontSize: item.fontSize ?? 54, color: item.color ?? "white", background: item.background !== false, opacity: item.backgroundOpacity ?? 0.47, padding: 10, font: "RoughCutText", weight: 700, shadow: "#000" }));
   // V2 overlays above source; S1 captions above overlays, matching the editor's semantic lanes.
   for (const item of [...overlays, ...captions]) {
     if (timeMs < item.startMs || timeMs >= item.endMs) continue;
@@ -75,15 +76,15 @@ export function drawText(context: Context, state: ProjectState, timeMs: number) 
     const inkTop = Math.min(...metrics.map((metric, index) => index * lineHeight - metric.actualBoundingBoxAscent));
     const inkBottom = Math.max(...metrics.map((metric, index) => index * lineHeight + metric.actualBoundingBoxDescent));
     const height = inkBottom - inkTop;
-    const top = item.position === "top" ? 60 : item.position === "bottom" ? FRAME_HEIGHT - 60 - height : (FRAME_HEIGHT - height) / 2;
     const width = Math.max(...metrics.map((metric) => metric.width), 0);
+    const { centreX, top } = textBoxPosition(item, width, height, item.background ? item.padding : 0);
     if (item.background) {
       context.fillStyle = `rgb(0 0 0 / ${item.opacity})`;
-      context.fillRect((FRAME_WIDTH - width) / 2 - item.padding, top - item.padding, width + item.padding * 2, height + item.padding * 2);
+      context.fillRect(centreX - width / 2 - item.padding, top - item.padding, width + item.padding * 2, height + item.padding * 2);
     }
     context.fillStyle = TEXT_COLORS[item.color];
     context.shadowColor = item.shadow; context.shadowBlur = item.weight === 600 ? 1 : 3; context.shadowOffsetY = item.weight === 600 ? 1 : 2;
-    lines.forEach((line, index) => context.fillText(line, FRAME_WIDTH / 2, top - inkTop + index * lineHeight));
+    lines.forEach((line, index) => context.fillText(line, centreX, top - inkTop + index * lineHeight));
     context.restore();
   }
 }

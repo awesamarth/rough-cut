@@ -32,6 +32,17 @@ export function boundedInteger(value: unknown, minimum: number, maximum: number,
 const objectSchema = (properties: Record<string, unknown>, required: string[] = []) => ({ type: "object", properties, required, additionalProperties: false });
 const string = (description: string) => ({ type: "string", description });
 const number = (description: string, minimum = 0) => ({ type: "number", description, minimum });
+const textCoordinates = { x: { type: "number", minimum: 0, maximum: 100, description: "Horizontal text-box centre, percent of frame" }, y: { type: "number", minimum: 0, maximum: 100, description: "Vertical text-box centre, percent of frame" } };
+export function coordinatePatch(input: Record<string, unknown>) {
+  const patch: { x?: number; y?: number } = input.position !== undefined ? { x: undefined, y: undefined } : {};
+  for (const axis of ["x", "y"] as const) {
+    const value = input[axis];
+    if (value === undefined) continue;
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 100) throw new Error(`${axis} must be between 0 and 100`);
+    patch[axis] = value;
+  }
+  return patch;
+}
 
 function collectionDiff(before: Array<{ id: string }>, after: Array<{ id: string }>) {
   const prior = new Map(before.map((item) => [item.id, item]));
@@ -198,8 +209,8 @@ export function useWebMCP(handlers: Handlers) {
       },
       {
         name: "set_captions", description: "Replace captions with timed timeline text cues.",
-        inputSchema: mutationSchema({ captions: { type: "array", items: objectSchema({ text: string("Caption"), start_ms: number("Timeline start"), end_ms: number("Timeline end"), position: { type: "string", enum: ["top", "center", "bottom"] } }, ["text", "start_ms", "end_ms"]) } }, ["captions"]),
-        async execute(input) { assertVersion(input); if (!Array.isArray(input.captions)) throw new Error("captions must be an array"); const items = input.captions.map((item) => { const value = item as Record<string, unknown>; const position: "top" | "center" | "bottom" = value.position === "top" || value.position === "center" ? value.position : "bottom"; return { text: asString(value.text, "text"), startMs: asNumber(value.start_ms, "start_ms"), endMs: asNumber(value.end_ms, "end_ms"), position }; }); return mutate({ type: "set_captions", actor: "agent", items }); },
+        inputSchema: mutationSchema({ captions: { type: "array", items: objectSchema({ text: string("Caption"), start_ms: number("Timeline start"), end_ms: number("Timeline end"), position: { type: "string", enum: ["top", "center", "bottom"] }, ...textCoordinates }, ["text", "start_ms", "end_ms"]) } }, ["captions"]),
+        async execute(input) { assertVersion(input); if (!Array.isArray(input.captions)) throw new Error("captions must be an array"); const items = input.captions.map((item) => { const value = item as Record<string, unknown>; const position: "top" | "center" | "bottom" = value.position === "top" || value.position === "center" ? value.position : "bottom"; return { text: asString(value.text, "text"), startMs: asNumber(value.start_ms, "start_ms"), endMs: asNumber(value.end_ms, "end_ms"), position, ...coordinatePatch(value) }; }); return mutate({ type: "set_captions", actor: "agent", items }); },
       },
       {
         name: "resync_captions", description: "Rebuild captions from the saved word-timestamped transcript and current clip layout without running transcription again. This replaces current captions.",
@@ -208,13 +219,13 @@ export function useWebMCP(handlers: Handlers) {
       },
       {
         name: "add_caption", description: "Add one positioned caption without replacing existing captions.",
-        inputSchema: mutationSchema({ text: string("Caption text"), start_ms: number("Timeline start"), end_ms: number("Timeline end"), position: { type: "string", enum: ["top", "center", "bottom"] } }, ["text", "start_ms", "end_ms"]),
-        async execute(input) { assertVersion(input); const position = input.position === "top" || input.position === "center" ? input.position : "bottom"; return mutate({ type: "add_caption", actor: "agent", item: { text: asString(input.text, "text"), startMs: asNumber(input.start_ms, "start_ms"), endMs: asNumber(input.end_ms, "end_ms"), position } }); },
+        inputSchema: mutationSchema({ text: string("Caption text"), start_ms: number("Timeline start"), end_ms: number("Timeline end"), position: { type: "string", enum: ["top", "center", "bottom"] }, ...textCoordinates }, ["text", "start_ms", "end_ms"]),
+        async execute(input) { assertVersion(input); const position = input.position === "top" || input.position === "center" ? input.position : "bottom"; return mutate({ type: "add_caption", actor: "agent", item: { text: asString(input.text, "text"), startMs: asNumber(input.start_ms, "start_ms"), endMs: asNumber(input.end_ms, "end_ms"), position, ...coordinatePatch(input) } }); },
       },
       {
         name: "update_caption", description: "Edit an existing caption's text, timing or position. Text corrections to generated captions also update their linked transcript words.",
-        inputSchema: mutationSchema({ caption_id: string("Caption ID"), text: { type: "string" }, start_ms: number("Timeline start"), end_ms: number("Timeline end"), position: { type: "string", enum: ["top", "center", "bottom"] } }, ["caption_id"]),
-        async execute(input) { assertVersion(input); const patch: Record<string, unknown> = {}; if (input.text !== undefined) patch.text = asString(input.text, "text"); if (input.start_ms !== undefined) patch.startMs = asNumber(input.start_ms, "start_ms"); if (input.end_ms !== undefined) patch.endMs = asNumber(input.end_ms, "end_ms"); if (input.position !== undefined) { if (input.position !== "top" && input.position !== "center" && input.position !== "bottom") throw new Error("Invalid position"); patch.position = input.position; } return mutate({ type: "update_caption", actor: "agent", id: asString(input.caption_id, "caption_id"), patch }); },
+        inputSchema: mutationSchema({ caption_id: string("Caption ID"), text: { type: "string" }, start_ms: number("Timeline start"), end_ms: number("Timeline end"), position: { type: "string", enum: ["top", "center", "bottom"] }, ...textCoordinates }, ["caption_id"]),
+        async execute(input) { assertVersion(input); const patch: Record<string, unknown> = {}; if (input.text !== undefined) patch.text = asString(input.text, "text"); if (input.start_ms !== undefined) patch.startMs = asNumber(input.start_ms, "start_ms"); if (input.end_ms !== undefined) patch.endMs = asNumber(input.end_ms, "end_ms"); if (input.position !== undefined) { if (input.position !== "top" && input.position !== "center" && input.position !== "bottom") throw new Error("Invalid position"); patch.position = input.position; } return mutate({ type: "update_caption", actor: "agent", id: asString(input.caption_id, "caption_id"), patch: { ...patch, ...coordinatePatch(input) } }); },
       },
       {
         name: "set_caption_style", description: "Set the shared subtitle size, color, background visibility and background opacity.",
@@ -228,13 +239,13 @@ export function useWebMCP(handlers: Handlers) {
       },
       {
         name: "add_text_overlay", description: "Add a positioned text overlay at timeline timestamps.",
-        inputSchema: mutationSchema({ text: string("Overlay text"), start_ms: number("Timeline start"), end_ms: number("Timeline end"), position: { type: "string", enum: ["top", "center", "bottom"] }, font_size: number("Font size"), color: { type: "string", enum: ["white", "yellow", "lime"] }, background: { type: "boolean" } }, ["text", "start_ms", "end_ms"]),
-        async execute(input) { assertVersion(input); const position = input.position === "top" || input.position === "bottom" ? input.position : "center"; const color = input.color === "yellow" || input.color === "lime" ? input.color : "white"; return mutate({ type: "add_overlay", actor: "agent", item: { text: asString(input.text, "text"), startMs: asNumber(input.start_ms, "start_ms"), endMs: asNumber(input.end_ms, "end_ms"), position, fontSize: input.font_size === undefined ? 54 : asNumber(input.font_size, "font_size"), color, background: input.background !== false } }); },
+        inputSchema: mutationSchema({ text: string("Overlay text"), start_ms: number("Timeline start"), end_ms: number("Timeline end"), position: { type: "string", enum: ["top", "center", "bottom"] }, font_size: number("Font size"), color: { type: "string", enum: ["white", "yellow", "lime"] }, background: { type: "boolean" }, background_opacity: { type: "number", minimum: 0, maximum: 1 }, ...textCoordinates }, ["text", "start_ms", "end_ms"]),
+        async execute(input) { assertVersion(input); const position = input.position === "top" || input.position === "bottom" ? input.position : "center"; const color = input.color === "yellow" || input.color === "lime" ? input.color : "white"; return mutate({ type: "add_overlay", actor: "agent", item: { text: asString(input.text, "text"), startMs: asNumber(input.start_ms, "start_ms"), endMs: asNumber(input.end_ms, "end_ms"), position, fontSize: input.font_size === undefined ? 54 : asNumber(input.font_size, "font_size"), color, background: input.background !== false, ...coordinatePatch(input), ...(input.background_opacity !== undefined ? { backgroundOpacity: asNumber(input.background_opacity, "background_opacity") } : {}) } }); },
       },
       {
         name: "update_text_overlay", description: "Edit an existing text overlay's text, timing or position.",
-        inputSchema: mutationSchema({ overlay_id: string("Overlay ID"), text: { type: "string" }, start_ms: number("Timeline start"), end_ms: number("Timeline end"), position: { type: "string", enum: ["top", "center", "bottom"] }, font_size: number("Font size"), color: { type: "string", enum: ["white", "yellow", "lime"] }, background: { type: "boolean" } }, ["overlay_id"]),
-        async execute(input) { assertVersion(input); const patch: Record<string, unknown> = {}; if (input.text !== undefined) patch.text = asString(input.text, "text"); if (input.start_ms !== undefined) patch.startMs = asNumber(input.start_ms, "start_ms"); if (input.end_ms !== undefined) patch.endMs = asNumber(input.end_ms, "end_ms"); if (input.position !== undefined) { if (input.position !== "top" && input.position !== "center" && input.position !== "bottom") throw new Error("Invalid position"); patch.position = input.position; } if (input.font_size !== undefined) patch.fontSize = asNumber(input.font_size, "font_size"); if (input.color !== undefined) { if (input.color !== "white" && input.color !== "yellow" && input.color !== "lime") throw new Error("Invalid color"); patch.color = input.color; } if (input.background !== undefined) { if (typeof input.background !== "boolean") throw new Error("background must be boolean"); patch.background = input.background; } return mutate({ type: "update_overlay", actor: "agent", id: asString(input.overlay_id, "overlay_id"), patch }); },
+        inputSchema: mutationSchema({ overlay_id: string("Overlay ID"), text: { type: "string" }, start_ms: number("Timeline start"), end_ms: number("Timeline end"), position: { type: "string", enum: ["top", "center", "bottom"] }, font_size: number("Font size"), color: { type: "string", enum: ["white", "yellow", "lime"] }, background: { type: "boolean" }, background_opacity: { type: "number", minimum: 0, maximum: 1 }, ...textCoordinates }, ["overlay_id"]),
+        async execute(input) { assertVersion(input); const patch: Record<string, unknown> = {}; if (input.text !== undefined) patch.text = asString(input.text, "text"); if (input.start_ms !== undefined) patch.startMs = asNumber(input.start_ms, "start_ms"); if (input.end_ms !== undefined) patch.endMs = asNumber(input.end_ms, "end_ms"); if (input.position !== undefined) { if (input.position !== "top" && input.position !== "center" && input.position !== "bottom") throw new Error("Invalid position"); patch.position = input.position; } if (input.font_size !== undefined) patch.fontSize = asNumber(input.font_size, "font_size"); if (input.color !== undefined) { if (input.color !== "white" && input.color !== "yellow" && input.color !== "lime") throw new Error("Invalid color"); patch.color = input.color; } if (input.background !== undefined) { if (typeof input.background !== "boolean") throw new Error("background must be boolean"); patch.background = input.background; } if (input.background_opacity !== undefined) patch.backgroundOpacity = asNumber(input.background_opacity, "background_opacity"); return mutate({ type: "update_overlay", actor: "agent", id: asString(input.overlay_id, "overlay_id"), patch: { ...patch, ...coordinatePatch(input) } }); },
       },
       {
         name: "remove_text_overlay", description: "Remove one text overlay by ID.",

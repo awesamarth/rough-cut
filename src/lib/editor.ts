@@ -83,6 +83,10 @@ export type TimedText = {
   fontSize?: number;
   color?: "white" | "yellow" | "lime";
   background?: boolean;
+  /** Frame-relative text box centre, in percent. Omitted axes use the preset. */
+  x?: number;
+  y?: number;
+  backgroundOpacity?: number;
 };
 
 export type CaptionStyle = {
@@ -270,9 +274,9 @@ export function retimeCaptionsForSpeed(captions: TimedText[], clip: Clip, speed:
   } : caption);
 }
 
-export function groupCaptionWords(words: TranscriptWord[], maxWords = 5, pauseMs = 700, maxDurationMs = 3000) {
-  const groups: TranscriptWord[][] = [];
-  let group: TranscriptWord[] = [];
+export function groupCaptionWords<T extends TranscriptWord>(words: T[], maxWords = 5, pauseMs = 700, maxDurationMs = 3000) {
+  const groups: T[][] = [];
+  let group: T[] = [];
   const flush = () => { if (group.length) groups.push(group); group = []; };
   for (const word of words) {
     const previous = group.at(-1);
@@ -285,25 +289,43 @@ export function groupCaptionWords(words: TranscriptWord[], maxWords = 5, pauseMs
 }
 
 export function captionsFromTranscript(state: ProjectState, transcript: TranscriptWord[]) {
-  return timelineClips(state).flatMap((entry) => {
-    const words = transcript.filter((word) => word.startMs >= entry.clip.sourceInMs && word.endMs <= entry.clip.sourceOutMs);
-    return groupCaptionWords(words).map((group) => ({
-      text: group.map((word) => word.word).join(" "),
-      startMs: entry.startMs + (group[0].startMs - entry.clip.sourceInMs) / entry.clip.speed,
-      endMs: entry.startMs + (group.at(-1)!.endMs - entry.clip.sourceInMs) / entry.clip.speed,
-      position: "bottom" as const,
-      sourceWordIds: group.map((word) => word.id),
-    }));
-  });
+  const mapped = mapCaptionWords(state, transcript, transcript.map((word) => word.id));
+  const segments = mapped.reduce<MappedWord[][]>((groups, word) => {
+    const group = groups.at(-1);
+    if (group?.[0].clipId === word.clipId) group.push(word);
+    else groups.push([word]);
+    return groups;
+  }, []);
+  return segments.flatMap((words) => groupCaptionWords(words).map((group) => ({
+    text: group.map((word) => word.word).join(" "),
+    startMs: group[0].timelineStartMs,
+    endMs: group.at(-1)!.timelineEndMs,
+    position: "bottom" as const,
+    sourceWordIds: group.map((word) => word.id),
+  })));
 }
 
 type MappedWord = TranscriptWord & { clipId: string; timelineStartMs: number; timelineEndMs: number };
 
 function mapCaptionWords(state: ProjectState, transcript: TranscriptWord[], sourceWordIds: string[]) {
   const wanted = new Set(sourceWordIds);
-  return timelineClips(state).flatMap(({ clip, startMs }) => transcript.flatMap<MappedWord>((word) => {
-    if (!wanted.has(word.id) || word.startMs < clip.sourceInMs || word.endMs > clip.sourceOutMs) return [];
-    return [{ ...word, clipId: clip.id, timelineStartMs: startMs + (word.startMs - clip.sourceInMs) / clip.speed, timelineEndMs: startMs + (word.endMs - clip.sourceInMs) / clip.speed }];
+  const runs = timelineClips(state).reduce<ReturnType<typeof timelineClips>[]>((groups, entry) => {
+    const group = groups.at(-1);
+    const previous = group?.at(-1);
+    // A plain split retains speech; a trim, gap, reorder or transition is not
+    // equivalent to continuous audio and must not resurrect a partial word.
+    if (previous && previous.clip.sourceOutMs === entry.clip.sourceInMs && Math.abs(previous.endMs - entry.startMs) < 0.001 && previous.clip.transition.type === "cut") group!.push(entry);
+    else groups.push([entry]);
+    return groups;
+  }, []);
+  return runs.flatMap((run) => transcript.flatMap<MappedWord>((word) => {
+    if (!wanted.has(word.id) || word.startMs < run[0].clip.sourceInMs || word.endMs > run.at(-1)!.clip.sourceOutMs) return [];
+    const first = run.find((entry) => word.startMs >= entry.clip.sourceInMs && word.startMs < entry.clip.sourceOutMs);
+    const last = run.find((entry) => word.endMs > entry.clip.sourceInMs && word.endMs <= entry.clip.sourceOutMs);
+    const midpoint = (word.startMs + word.endMs) / 2;
+    const owner = run.find((entry) => midpoint >= entry.clip.sourceInMs && midpoint < entry.clip.sourceOutMs);
+    if (!first || !last || !owner) return [];
+    return [{ ...word, clipId: owner.clip.id, timelineStartMs: first.startMs + (word.startMs - first.clip.sourceInMs) / first.clip.speed, timelineEndMs: last.startMs + (word.endMs - last.clip.sourceInMs) / last.clip.speed }];
   })).sort((a, b) => a.timelineStartMs - b.timelineStartMs);
 }
 
@@ -536,6 +558,8 @@ export function validateState(value: unknown): asserts value is ProjectState {
     validateIds(collection, "text");
     collection.forEach((item) => {
       validateRange(item.startMs, item.endMs, duration);
+      for (const axis of ["x", "y"] as const) if (item[axis] !== undefined) bounded(item[axis]!, 0, 100, `Text ${axis}`);
+      if (item.backgroundOpacity !== undefined) bounded(item.backgroundOpacity, 0, 1, "Text background opacity");
       if (typeof item.text !== "string" || !item.text.trim() || !["top", "center", "bottom"].includes(item.position) || item.sourceWordIds !== undefined && (!Array.isArray(item.sourceWordIds) || item.sourceWordIds.some((id) => typeof id !== "string")) || item.fontSize !== undefined && (!Number.isFinite(item.fontSize) || item.fontSize < 16 || item.fontSize > 160) || item.color !== undefined && !["white", "yellow", "lime"].includes(item.color) || item.background !== undefined && typeof item.background !== "boolean") throw new Error("Invalid text item");
     });
   }

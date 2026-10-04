@@ -1,10 +1,18 @@
 import { expect, test } from "bun:test";
 import { applyCommand, createProjectState } from "@/lib/editor";
-import { boundedInteger, compactMutationResult } from "./use-webmcp";
+import { boundedInteger, compactMutationResult, coordinatePatch } from "./use-webmcp";
 
 test("tool pagination rejects values that would bypass bounded output", () => {
   for (const value of [-1, 0, 501, Infinity, NaN, 1.5, "500"]) expect(() => boundedInteger(value, 1, 500, "limit")).toThrow();
   expect(boundedInteger(500, 1, 500, "limit")).toBe(500);
+});
+
+test("agent coordinate updates match human preset/reset semantics and reject invalid coordinates", () => {
+  expect(coordinatePatch({ x: 0, y: 100 })).toEqual({ x: 0, y: 100 });
+  expect(coordinatePatch({ position: "top" })).toEqual({ x: undefined, y: undefined });
+  expect(coordinatePatch({ position: "center", x: 25 })).toEqual({ x: 25, y: undefined });
+  expect(coordinatePatch({})).toEqual({});
+  for (const value of [-1, 101, NaN, Infinity, "50"]) expect(() => coordinatePatch({ x: value })).toThrow();
 });
 
 const projectId = "00000000-0000-4000-8000-000000000000";
