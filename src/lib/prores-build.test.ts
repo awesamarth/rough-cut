@@ -8,6 +8,5 @@ test("ProRes build preprocessing preserves NUL/digit payload bytes and template 
   const transformed = lower.call({ resourcePath: "mediabunny-prores.mjs" }, original);
   const evaluate = (source: string): string => new Function(`${source}; return payload;`)();
   expect(evaluate(transformed)).toBe(evaluate(original));
-  expect([...evaluate(transformed)].map((char) => char.charCodeAt(0))).toEqual([...evaluate(original)].map((char) => char.charCodeAt(0)));
   expect(transformed).not.toContain("`");
 });

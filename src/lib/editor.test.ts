@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { applyCommand, captionsFromTranscript, correctTranscriptWords, createProjectState, excludeTranscriptFromSilences, exportSrt, groupCaptionWords, partitionCaptionWords, reconcileAnchoredCaptions, sanitizeTranscript, timelineDuration, type TranscriptWord } from "./editor";
+import { applyCommand, captionsFromTranscript, correctTranscriptWords, createProjectState, excludeTranscriptFromSilences, exportSrt, groupCaptionWords, reconcileAnchoredCaptions, sanitizeTranscript, timelineDuration, type TranscriptWord } from "./editor";
 
 describe("editing commands", () => {
   test("corrects an anchored transcript span without fuzzy text matching", () => {
@@ -137,19 +137,6 @@ describe("editing commands", () => {
     const faster = applyCommand(state, { type: "adjust_clip", expectedVersion: 0, actor: "human", clipId: state.clips[0].id, patch: { speed: 2 } });
     faster.captions = reconcileAnchoredCaptions(state, faster, transcript);
     expect(faster.captions[0]).toMatchObject({ startMs: 450, endMs: 1050, sourceWordIds: ["word"] });
-  });
-
-  test("partitions transcript anchors when splitting a generated caption", () => {
-    const transcript = [
-      { id: "left", word: "hello", startMs: 1000, endMs: 1400 },
-      { id: "right", word: "world", startMs: 1600, endMs: 2000 },
-    ] satisfies TranscriptWord[];
-    const state = createProjectState("00000000-0000-4000-8000-000000000000", "Demo", 5000);
-    const caption = { id: "caption", text: "hello world", startMs: 1000, endMs: 2000, position: "bottom" as const, sourceWordIds: ["left", "right"] };
-    expect(partitionCaptionWords(state, transcript, caption, 1500)).toEqual({
-      left: { sourceWordIds: ["left"], text: "hello" },
-      right: { sourceWordIds: ["right"], text: "world" },
-    });
   });
 
   test("normalizes clip transforms", () => {

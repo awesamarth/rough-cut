@@ -4,7 +4,7 @@ import { RESERVE_CLOUD_USAGE } from "./cloud-budget";
 import { readBody } from "./request-body";
 import { transcriptionDurationSeconds } from "./transcription-audio";
 
-test("global reservations cannot exceed units or request limits", async () => {
+test("per-database reservations cannot exceed units or request limits", async () => {
   const db = new Database(":memory:");
   try {
     db.exec(await Bun.file("migrations/0002_cloud_usage.sql").text());

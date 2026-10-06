@@ -26,7 +26,7 @@ function box(type: string, payload: Uint8Array) {
 }
 function concat(...parts: Uint8Array[]) { const result = new Uint8Array(parts.reduce((size, part) => size + part.length, 0)); let offset = 0; for (const part of parts) { result.set(part, offset); offset += part.length; } return result; }
 
-test("MP4 timing patch adds an AAC priming edit without changing media bytes", () => {
+test("MP4 metadata patch writes AAC priming and rejects unsafe metadata", () => {
   const mvhd = new Uint8Array(100); new DataView(mvhd.buffer).setUint32(12, 1000);
   const mdhd = new Uint8Array(24); new DataView(mdhd.buffer).setUint32(12, 48000);
   const handler = new Uint8Array(24); handler.set(new TextEncoder().encode("soun"), 8);

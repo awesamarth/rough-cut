@@ -3,6 +3,7 @@ import { FRAME_HEIGHT, FRAME_WIDTH, framePlan, TEXT_COLORS } from "./composition
 import type { ProjectState } from "./editor";
 import { ensureTrackDecodable } from "./codec-support";
 import { textBoxPosition } from "./text-position";
+import { selectVideoFrame } from "./video-frame-selection";
 
 export type MediaSource = Blob | string;
 type Context = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
@@ -14,7 +15,7 @@ class FrameReader {
   private following?: Frame;
   private last = -Infinity;
   constructor(private sink: CanvasSink) {}
-  async get(time: number) {
+  async get(time: number, sourceOutSeconds: number, speed: number) {
     if (!this.iterator || time < this.last || time - this.last > 2) {
       await this.close();
       this.iterator = this.sink.canvases(time);
@@ -26,7 +27,7 @@ class FrameReader {
       this.following = (await this.iterator.next()).value || undefined;
     }
     this.last = time;
-    return this.current?.canvas;
+    return selectVideoFrame(this.current, this.following, time, sourceOutSeconds, speed)?.canvas;
   }
   async close() { await this.iterator?.return(); this.iterator = undefined; this.current = undefined; this.following = undefined; }
 }
@@ -131,7 +132,7 @@ export class VideoRenderer {
           reader = new FrameReader(new CanvasSink(track, { width: FRAME_WIDTH, height: FRAME_HEIGHT, fit: "contain", poolSize: 3 }));
           this.readers.set(clip.id, reader);
         }
-        const image = await reader.get(sourceSeconds);
+        const image = await reader.get(sourceSeconds, clip.sourceOutMs / 1000, clip.speed);
         if (!image) throw new Error(`No decoded video frame at ${sourceSeconds.toFixed(3)}s`);
         context.save();
         context.globalAlpha = video;
