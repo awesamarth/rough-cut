@@ -5,7 +5,9 @@ import { useConfirmation } from "./modal";
 
 import Link from "next/link";
 import { Download, Link2, Magnet, Maximize2, Minimize2, RotateCcw, Unlink2, Volume2, VolumeX } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { centeredTimelineScroll, focusTimeline, timelineWheelZoom } from "@/lib/timeline-interaction";
+import { TimelineTrimHandle } from "./timeline-trim-handle";
 import { bladeSplitCommand, captionsFromTranscript, clipDuration, excludeTranscriptFromSilences, exportSrt, musicClipEnd, timelineClips, timelineDuration, timelineToSource, type Clip, type MusicClip, type ProjectState, type TimedText, type TranscriptWord } from "@/lib/editor";
 import { exportEdl } from "@/lib/edl";
 import { type CommandInput, useEditor } from "./use-editor";
@@ -837,7 +839,12 @@ export function Timeline({ state, waveform, musicWaveform, musicPreview, snappin
   const [viewportWidth, setViewportWidth] = useState(0);
   const [trackHeight, setTrackHeight] = useState(240);
   const [scrollTop, setScrollTop] = useState(0);
-  const [zoom, setZoom] = useState(1);
+  // A request object also commits a batched in/out gesture whose final scale
+  // equals the previous scale, so its pending focus-point scroll isn't lost.
+  const [zoomRequest, setZoomRequest] = useState({ scale: 1 });
+  const zoom = zoomRequest.scale;
+  const wheelZoom = useRef(1);
+  const zoomAnchor = useRef<number | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const trackRef = useRef<HTMLDivElement>(null);
   const bladeGuideRef = useRef<HTMLDivElement>(null);
@@ -905,19 +912,27 @@ export function Timeline({ state, waveform, musicWaveform, musicPreview, snappin
       }
       if (naturalWidth <= 0) return;
       event.preventDefault();
-      const rect = container.getBoundingClientRect();
-      const pointerX = event.clientX - rect.left;
-      const timelineRatio = Math.max(0, Math.min(1, (container.scrollLeft + pointerX) / Math.max(1, trackWidth)));
       const availableWidth = Math.max(1, container.clientWidth - 10);
-      const minimum = Math.min(1, availableWidth / naturalWidth);
-      const next = Math.max(minimum, Math.min(12, zoom * Math.exp(-event.deltaY * 0.003)));
-      const nextWidth = Math.max(availableWidth, naturalWidth * next);
-      setZoom(next);
-      requestAnimationFrame(() => { container.scrollLeft = Math.max(0, timelineRatio * nextWidth - pointerX); });
+      const next = timelineWheelZoom(wheelZoom.current, naturalWidth, availableWidth, event.deltaY, event.deltaMode);
+      if (next === wheelZoom.current && zoomAnchor.current === null) {
+        container.scrollLeft = centeredTimelineScroll(playheadMs, total, trackRef.current?.clientWidth ?? availableWidth, availableWidth);
+        return;
+      }
+      // Accumulate rapid wheel events before React renders; centre only after
+      // the new track width is committed, not against the previous DOM width.
+      wheelZoom.current = next;
+      zoomAnchor.current = playheadMs;
+      setZoomRequest({ scale: next });
     };
     container.addEventListener("wheel", zoomTimeline, { passive: false });
     return () => container.removeEventListener("wheel", zoomTimeline);
-  }, [naturalWidth, trackWidth, zoom]);
+  }, [naturalWidth, playheadMs, total]);
+  useLayoutEffect(() => {
+    const container = scrollRef.current;
+    if (!container || zoomAnchor.current === null) return;
+    container.scrollLeft = centeredTimelineScroll(zoomAnchor.current, total, trackRef.current?.clientWidth ?? width, Math.max(1, container.clientWidth - 10));
+    zoomAnchor.current = null;
+  }, [zoomRequest, width, total]);
   useEffect(() => {
     const container = scrollRef.current;
     if (!container || !trackWidth || !total) return;
@@ -1008,9 +1023,12 @@ export function Timeline({ state, waveform, musicWaveform, musicPreview, snappin
     trackDrag(event, move, finish);
   };
   const trim = (event: React.PointerEvent, clip: Clip, edge: "in" | "out") => {
+    if (event.button !== 0) return;
     event.preventDefault();
     event.stopPropagation();
+    onSelect(clip.id);
     const startX = event.clientX;
+    let dragged = false;
     const startScroll = scrollRef.current?.scrollLeft ?? 0;
     const startIn = clip.sourceInMs; const startOut = clip.sourceOutMs;
     const timelineWidth = (event.currentTarget.closest(".timeline-track") as HTMLElement).offsetWidth;
@@ -1032,8 +1050,13 @@ export function Timeline({ state, waveform, musicWaveform, musicPreview, snappin
       const sourceOutMs = edge === "out" ? Math.min(state.durationMs, Math.max(startIn + 50, startOut + sourceDelta)) : startOut;
       return { clipId: clip.id, startMs: clip.timelineStartMs + (sourceInMs - startIn) / clip.speed, durationMs: (sourceOutMs - sourceInMs) / clip.speed, sourceInMs, sourceOutMs };
     };
-    const move = (pointer: { clientX: number; altKey: boolean }) => setTrimming(calculate(pointer));
+    const move = (pointer: { clientX: number; altKey: boolean }) => {
+      dragged ||= Math.abs(pointer.clientX - startX) > 2 || Math.abs((scrollRef.current?.scrollLeft ?? 0) - startScroll) > 2;
+      if (dragged) setTrimming(calculate(pointer));
+    };
     const finish = (up: { clientX: number; altKey: boolean }) => {
+      move(up);
+      if (!dragged) return; // An edge click selects; snapping must not trim it.
       const result = calculate(up);
       setTrimming(null);
       if (Math.abs(result.sourceInMs - startIn) < 1 && Math.abs(result.sourceOutMs - startOut) < 1) return;
@@ -1122,8 +1145,10 @@ export function Timeline({ state, waveform, musicWaveform, musicPreview, snappin
     update(event);
     trackDrag(event, update, update);
   };
-  return <div className={`relative min-h-0 min-w-0 w-full flex-1 overflow-hidden ${bladeMode ? "[&_[data-blade-kind]]:!cursor-[url(/cursors/blade.svg)_8_22,crosshair] [&_[data-blade-kind]_*]:!cursor-[url(/cursors/blade.svg)_8_22,crosshair]" : ""}`} onPointerDownCapture={(event) => {
-    if (!bladeMode || event.button !== 0) return;
+  return <div tabIndex={-1} role="region" aria-label="Timeline" className={`relative min-h-0 min-w-0 w-full flex-1 overflow-hidden outline-none ${bladeMode ? "[&_[data-blade-kind]]:!cursor-[url(/cursors/blade.svg)_8_22,crosshair] [&_[data-blade-kind]_*]:!cursor-[url(/cursors/blade.svg)_8_22,crosshair]" : ""}`} onPointerDownCapture={(event) => {
+    if (event.button !== 0) return;
+    focusTimeline(event.currentTarget);
+    if (!bladeMode) return;
     const target = (event.target as Element).closest<HTMLElement>("[data-blade-kind]");
     const rect = trackRef.current?.getBoundingClientRect();
     if (!target || !rect?.width) return;
@@ -1144,9 +1169,9 @@ export function Timeline({ state, waveform, musicWaveform, musicPreview, snappin
     {state.captions.map((item) => { const draft = movingText?.kind === "caption" && movingText.id === item.id ? movingText : item; return <div key={item.id} data-blade-kind="caption" data-blade-id={item.id} className={`group absolute z-[2] flex touch-none items-end overflow-hidden rounded bg-[#6d5d1dcc] text-[9px] leading-none text-[#fff2b3] ring-1 ring-inset ${selectedText?.kind === "caption" && selectedText.id === item.id ? "ring-[var(--lime)]" : "ring-[#d5b84a]"}`} style={{ top: `${lanes.S1.top}%`, height: `${lanes.S1.height}%`, left: `${draft.startMs / total * 100}%`, width: `${(draft.endMs - draft.startMs) / total * 100}%` }} onPointerDown={(event) => { onEditText("caption", item.id); dragText(event, "caption", item, "move"); }} onClick={(event) => event.stopPropagation()} onDoubleClick={(event) => { event.stopPropagation(); onEditText("caption", item.id); }}><button className="absolute inset-y-0 left-0 w-1.5 cursor-ew-resize border-0 bg-[#ffe066aa] p-0 opacity-0 group-hover:opacity-100" aria-label="Trim caption start" onPointerDown={(event) => dragText(event, "caption", item, "in")} /><span className="block overflow-hidden px-2 pb-1 text-ellipsis whitespace-nowrap">{item.text}</span><button className="absolute inset-y-0 right-0 w-1.5 cursor-ew-resize border-0 bg-[#ffe066aa] p-0 opacity-0 group-hover:opacity-100" aria-label="Trim caption end" onPointerDown={(event) => dragText(event, "caption", item, "out")} /></div>; })}
     {state.overlays.map((item) => { const draft = movingText?.kind === "overlay" && movingText.id === item.id ? movingText : item; return <div key={item.id} data-blade-kind="overlay" data-blade-id={item.id} className={`group absolute z-[2] flex touch-none items-end overflow-hidden rounded bg-[#243f69dd] text-[9px] leading-none text-[#cde0ff] ring-1 ring-inset ${selectedText?.kind === "overlay" && selectedText.id === item.id ? "ring-[var(--lime)]" : "ring-[#5b8bd9]"}`} style={{ top: `${lanes.V2.top}%`, height: `${lanes.V2.height}%`, left: `${draft.startMs / total * 100}%`, width: `${(draft.endMs - draft.startMs) / total * 100}%` }} onPointerDown={(event) => { onEditText("overlay", item.id); dragText(event, "overlay", item, "move"); }} onClick={(event) => event.stopPropagation()} onDoubleClick={(event) => { event.stopPropagation(); onEditText("overlay", item.id); }}><button className="absolute inset-y-0 left-0 w-1.5 cursor-ew-resize border-0 bg-[#7aa8ffaa] p-0 opacity-0 group-hover:opacity-100" aria-label="Trim text start" onPointerDown={(event) => dragText(event, "overlay", item, "in")} /><span className="block overflow-hidden px-2 pb-1 text-ellipsis whitespace-nowrap">{item.text}</span><button className="absolute inset-y-0 right-0 w-1.5 cursor-ew-resize border-0 bg-[#7aa8ffaa] p-0 opacity-0 group-hover:opacity-100" aria-label="Trim text end" onPointerDown={(event) => dragText(event, "overlay", item, "out")} /></div>; })}
     {entries.map(({ clip, startMs, durationMs }, index) => <div key={clip.id} data-blade-kind="video" data-blade-id={clip.id} className="group absolute z-[2] touch-none cursor-grab active:cursor-grabbing" style={{ top: `${lanes.V1.top}%`, height: `${lanes.V1.height}%`, left: `${((moving?.clipId === clip.id ? moving.startMs : trimming?.clipId === clip.id ? trimming.startMs : startMs) / total) * 100}%`, width: `${((trimming?.clipId === clip.id ? trimming.durationMs : durationMs) / total) * 100}%` }} onPointerDown={(event) => { onSelect(clip.id); moveClip(event, clip); }} onClick={(event) => event.stopPropagation()}>
-      <button data-trim-handle className={`absolute top-0 left-0 z-[3] h-full w-[9px] cursor-ew-resize rounded-l border-0 bg-[var(--lime)] ${bladeMode ? "hidden" : selectedClipId === clip.id ? "opacity-[.85]" : "opacity-0 group-hover:opacity-[.85]"}`} aria-label="Trim linked clip start" onClick={(event) => event.stopPropagation()} onPointerDown={(event) => trim(event, clip, "in")} />
-      <div className={`relative flex size-full items-end gap-2 overflow-hidden bg-gradient-to-br from-[#293341] to-[#1d252f] px-2.5 pb-1.5 ${index === 0 ? "rounded-l-[5px]" : ""} ${index === entries.length - 1 ? "rounded-r-[5px]" : ""} ${selectedClipId === clip.id ? linkedClipSelection : ""}`}><span className="font-mono text-[10px] text-[#c0c6cf]">{formatTime(trimming?.clipId === clip.id ? trimming.durationMs : durationMs)}</span>{clip.transition.type !== "cut" && <i className="ml-auto whitespace-nowrap text-[8px] not-italic text-[var(--orange)]">{clip.transition.type}</i>}</div>
-      <button data-trim-handle className={`absolute top-0 right-0 z-[3] h-full w-[9px] cursor-ew-resize rounded-r border-0 bg-[var(--lime)] ${bladeMode ? "hidden" : selectedClipId === clip.id ? "opacity-[.85]" : "opacity-0 group-hover:opacity-[.85]"}`} aria-label="Trim linked clip end" onClick={(event) => event.stopPropagation()} onPointerDown={(event) => trim(event, clip, "out")} />
+      <TimelineTrimHandle edge="in" label="Trim linked clip start" hidden={bladeMode} onPointerDown={(event) => trim(event, clip, "in")} />
+      <div className={`relative flex size-full items-end gap-2 overflow-hidden bg-gradient-to-br from-[#293341] to-[#1d252f] pb-1.5 ${index === 0 ? "rounded-l-[5px]" : ""} ${index === entries.length - 1 ? "rounded-r-[5px]" : ""} ${selectedClipId === clip.id ? linkedClipSelection : ""}`}><span className="px-2.5 font-mono text-[10px] text-[#c0c6cf]">{formatTime(trimming?.clipId === clip.id ? trimming.durationMs : durationMs)}</span>{clip.transition.type !== "cut" && <i className="ml-auto whitespace-nowrap text-[8px] not-italic text-[var(--orange)]">{clip.transition.type}</i>}</div>
+      <TimelineTrimHandle edge="out" label="Trim linked clip end" hidden={bladeMode} onPointerDown={(event) => trim(event, clip, "out")} />
     </div>)}
     {entries.map(({ clip, startMs, durationMs }) => <div key={`audio-${clip.id}`} data-blade-kind="video" data-blade-id={clip.id} className={`absolute z-[1] overflow-hidden rounded bg-[#18302f] ${selectedClipId === clip.id ? linkedClipSelection : ""}`} style={{ top: `${lanes.A1.top}%`, height: `${lanes.A1.height}%`, left: `${((moving?.clipId === clip.id ? moving.startMs : trimming?.clipId === clip.id ? trimming.startMs : startMs) / total) * 100}%`, width: `${((trimming?.clipId === clip.id ? trimming.durationMs : durationMs) / total) * 100}%` }} onClick={(event) => { event.stopPropagation(); onSelect(clip.id); }}><AudioWaveform peaks={waveform} clip={trimming?.clipId === clip.id ? { ...clip, sourceInMs: trimming.sourceInMs, sourceOutMs: trimming.sourceOutMs } : clip} durationMs={state.durationMs} />{clip.muted ? <VolumeX className="absolute top-1/2 right-2 size-3 -translate-y-1/2 text-[#829b96]" aria-hidden="true" /> : <Volume2 className="absolute top-1/2 right-2 size-3 -translate-y-1/2 text-[#76c7b7]" aria-hidden="true" />}</div>)}
     {state.music.map((music) => { const previewed = musicPreview?.clipId === music.id ? { ...music, ...musicPreview.patch } : music; const draft = movingMusic?.clipId === music.id ? { ...previewed, ...movingMusic } : previewed; const end = musicClipEnd(state, draft); return <div key={music.id} data-blade-kind="music" data-blade-id={music.id} className={`group absolute z-[2] flex touch-none cursor-grab items-end overflow-hidden rounded border bg-[#342450dd] ${selectedMusicId === music.id ? "border-[var(--lime)]" : "border-[#805fc0]"}`} style={{ top: `${lanes.A2.top}%`, height: `${lanes.A2.height}%`, left: `${draft.timelineStartMs / total * 100}%`, width: `${Math.max(0, end - draft.timelineStartMs) / total * 100}%` }} onPointerDown={(event) => { onEditMusic(music.id); dragMusic(event, music, "move"); }} onClick={(event) => event.stopPropagation()} onDoubleClick={(event) => { event.stopPropagation(); onEditMusic(music.id); }}><button className="absolute inset-y-0 left-0 z-[2] w-2 cursor-ew-resize border-0 bg-[#b38cffaa] p-0 opacity-0 group-hover:opacity-100" aria-label="Trim music start" onPointerDown={(event) => dragMusic(event, music, "in")} /><MusicWaveform peaks={musicWaveform} music={draft} timelineDurationMs={Math.max(0, end - draft.timelineStartMs)} /><span className="relative z-[1] mb-1 px-2 text-[9px] leading-none text-[#e1d2ff] text-shadow-[0_1px_2px_#000]">{music.name}{music.loop ? " · loop" : ""}</span><button className="absolute inset-y-0 right-0 z-[2] w-2 cursor-ew-resize border-0 bg-[#b38cffaa] p-0 opacity-0 group-hover:opacity-100" aria-label="Trim music end" onPointerDown={(event) => dragMusic(event, music, "out")} /></div>; })}

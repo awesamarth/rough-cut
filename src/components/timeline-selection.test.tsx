@@ -36,6 +36,16 @@ test("timeline selection stays linked and tiny text boxes have no padding/border
     }
     expect(html.match(/<span class="block overflow-hidden px-2 pb-1 text-ellipsis whitespace-nowrap">/g)).toHaveLength(2);
   }
-  expect(render(true, true).match(/hidden" aria-label="Trim linked clip (start|end)"/g)).toHaveLength(2);
-  expect(render(true, false)).not.toMatch(/hidden" aria-label="Trim linked clip/);
+  for (const bladeMode of [false, true]) {
+    const handles = render(true, bladeMode).match(/<button[^>]+aria-label="Trim linked clip (?:start|end)"[^>]*>/g)!;
+    expect(handles).toHaveLength(2);
+    for (const handle of handles) {
+      const classes = handle.match(/class="([^"]+)"/)![1].split(/\s+/);
+      expect(classes.includes("hidden")).toBe(bladeMode);
+      expect(handle).toContain("width:min(8px, 50%)");
+      expect(classes).toContain("bg-transparent");
+      expect(classes).toContain("hover:after:opacity-100");
+      expect(classes).not.toContain("group-hover:opacity-[.85]");
+    }
+  }
 });
